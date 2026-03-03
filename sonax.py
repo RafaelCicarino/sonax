@@ -1,4 +1,4 @@
-import re
+﻿import re
 import time
 import socket
 from dataclasses import dataclass
@@ -20,21 +20,15 @@ from selenium.webdriver.support import expected_conditions as EC
 URL = "https://chat.sonax.net.br/app/omnichannel/chat"
 
 
-# =============================
-# Model
-# =============================
 @dataclass
 class Cliente:
     nome: str
     placa: str
     telefone: str
     endereco: str = ""
-    horario: str = ""  # aqui vai a DATA do seu arquivo (ex: 02/03/2026)
+    horario: str = ""  # data
 
 
-# =============================
-# Parsing DOCX
-# =============================
 PHONE_RE = re.compile(r"(?:\+?55)?\s*\(?\d{2}\)?\s*\d{4,5}-?\d{4}")
 PLATE_CANDIDATE_RE = re.compile(r"\b[A-Z]{3}[A-Z0-9]{4,5}\b", re.IGNORECASE)
 
@@ -133,7 +127,7 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     if not nome:
         nome = "Sem nome"
 
-    # endereço (primeira linha com rua/av)
+    # endereÃ§o (primeira linha com rua/av)
     endereco = ""
     for ln in lines:
         if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
@@ -179,9 +173,6 @@ def parse_docx_to_clients(file_bytes: bytes) -> List[Cliente]:
     return out
 
 
-# =============================
-# Debug port test
-# =============================
 def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout_s):
@@ -190,9 +181,8 @@ def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
         return False
 
 
-# =============================
-# Selenium (attach OR new chrome)
-# =============================
+# bloqueando pop ups
+
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts = Options()
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
@@ -273,16 +263,15 @@ def ensure_sonax_tab(driver):
     WebDriverWait(driver, 30).until(lambda d: d.execute_script("return document.readyState") in ("interactive", "complete"))
 
 
-# =============================
-# Selectors
-# =============================
+# SeleÃ§Ã£o
+
 SEL_CONTATOS = (By.XPATH, "//a[contains(@class,'nav-link')][contains(.,'Contatos')]")
 SEL_BUSCA = (By.CSS_SELECTOR, "input.form-control.input-search")
 SEL_CONVERSAR = (By.CSS_SELECTOR, "button#dropdownBasic1")
 SEL_LWSIMAPP = (By.XPATH, "//*[contains(@class,'ml-2') and contains(.,'LWSIMAPP')]")
 SEL_COMBOBOX = (By.CSS_SELECTOR, "input[role='combobox']")
 SEL_TEMPLATE = (By.XPATH, "//span[contains(@class,'ng-option-label') and normalize-space(.)='abertura_de_diagnostico_tagpro']")
-SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variável aqui']")
+SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variÃ¡vel aqui']")
 SEL_ENVIAR = (By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space(.)='Enviar']")
 
 
@@ -305,12 +294,12 @@ def click_card_contact(driver, phone_digits: str) -> bool:
 
 def fill_template_variables_in_order(driver, placa: str, data: str, endereco: str):
     """
-    Como os 3 campos são iguais, preenche pela ORDEM:
+    Como os 3 campos sÃ£o iguais, preenche pela ORDEM:
     [0]=placa, [1]=data, [2]=endereco
     """
     inputs = WebDriverWait(driver, 25).until(lambda d: d.find_elements(*SEL_VAR_INPUTS))
     if len(inputs) < 3:
-        raise RuntimeError(f"Esperava 3 campos de variável, mas encontrei {len(inputs)}.")
+        raise RuntimeError(f"Esperava 3 campos de variÃ¡vel, mas encontrei {len(inputs)}.")
 
     values = [placa or "", data or "", endereco or ""]
     for i in range(3):
@@ -326,13 +315,13 @@ def fill_template_variables_in_order(driver, placa: str, data: str, endereco: st
 def run_one_client(driver, client: Cliente, log):
     maybe_close_popup(driver)
 
-    log(f"➡️ {client.nome}: Contatos")
+    log(f"âž¡ï¸ {client.nome}: Contatos")
     click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
     maybe_close_popup(driver)
 
     found = False
     for ph in phone_variations(client.telefone):
-        log(f"🔎 {client.nome}: Buscar {ph}")
+        log(f"ðŸ”Ž {client.nome}: Buscar {ph}")
         click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
         type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30)
         time.sleep(0.9)
@@ -341,39 +330,36 @@ def run_one_client(driver, client: Cliente, log):
             break
 
     if not found:
-        log(f"❌ {client.nome}: NÃO ENCONTRADO")
-        return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "NÃO ENCONTRADO"}
+        log(f"âŒ {client.nome}: NÃƒO ENCONTRADO")
+        return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "NÃƒO ENCONTRADO"}
 
     maybe_close_popup(driver)
 
-    log(f"💬 {client.nome}: Conversar")
+    log(f"ðŸ’¬ {client.nome}: Conversar")
     click_retry(driver, *SEL_CONVERSAR, tries=3, timeout=30)
     maybe_close_popup(driver)
 
-    log(f"📲 {client.nome}: LWSIMAPP")
+    log(f"ðŸ“² {client.nome}: LWSIMAPP")
     click_retry(driver, *SEL_LWSIMAPP, tries=3, timeout=30)
     maybe_close_popup(driver)
 
-    log(f"🧾 {client.nome}: Template")
+    log(f"ðŸ§¾ {client.nome}: Template")
     click_retry(driver, *SEL_COMBOBOX, tries=3, timeout=30)
     click_retry(driver, *SEL_TEMPLATE, tries=3, timeout=30)
     maybe_close_popup(driver)
 
-    log(f"⌨️ {client.nome}: preenchendo variáveis (placa/data/endereço)")
+    log(f"âŒ¨ï¸ {client.nome}: preenchendo variÃ¡veis (placa/data/endereÃ§o)")
     fill_template_variables_in_order(driver, client.placa, client.horario, client.endereco)
     maybe_close_popup(driver)
 
-    log(f"📨 {client.nome}: Enviar")
+    log(f"ðŸ“¨ {client.nome}: Enviar")
     click_retry(driver, *SEL_ENVIAR, tries=3, timeout=30)
 
-    log(f"✅ {client.nome}: OK")
+    log(f"âœ… {client.nome}: OK")
     return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "OK"}
 
 
-# =============================
-# UI (clean)
-# =============================
-st.set_page_config(page_title="Sonax Automação", layout="wide")
+st.set_page_config(page_title="Sonax AutomaÃ§Ã£o", layout="wide")
 st.markdown("""
 <style>
 section[data-testid="stSidebar"] { display: none !important; }
@@ -382,24 +368,18 @@ div[data-testid="collapsedControl"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Sonax • Automação de Contatos")
+st.title("Sonax â€¢ AutomaÃ§Ã£o da KESIA")
 
 st.session_state.setdefault("attach", True)
 st.session_state.setdefault("debug_port", 9222)
 st.session_state.setdefault("max_items", 50)
 
-with st.expander("⚙ Configurar (opcional)", expanded=False):
-    st.session_state.attach = st.checkbox("Anexar ao Chrome já aberto (porta 9222)", value=st.session_state.attach)
-    st.session_state.debug_port = st.number_input("Porta", 1, 65535, int(st.session_state.debug_port), 1)
-    st.session_state.max_items = st.number_input("Processar quantos clientes", 1, 500, int(st.session_state.max_items), 1)
-
-    st.caption("Se anexar falhar, o app abre um Chrome novo automaticamente.")
-    with st.expander("Como abrir o Chrome no modo correto", expanded=False):
-        st.code('chrome.exe --remote-debugging-port=9222 --user-data-dir="%TEMP%\\chrome_sonax_profile"', language="bat")
+with st.expander("âš™ Configurar", expanded=False):
+    st.session_state.max_items = st.number_input("Processar quantos clientes ? ", 1, 500, int(st.session_state.max_items), 1)
 
 st.markdown("---")
 
-uploaded = st.file_uploader("📄 Envie o DOCX com os clientes", type=["docx"])
+uploaded = st.file_uploader("ðŸ“„ Envie o Arquivo DOCX com os clientes", type=["docx"])
 if not uploaded:
     st.info("Envie o arquivo para carregar os clientes.")
     st.stop()
@@ -412,7 +392,7 @@ st.success(f"Clientes carregados: {len(clients)}")
 with st.expander("Ver clientes identificados", expanded=False):
     st.dataframe(pd.DataFrame([c.__dict__ for c in clients]), use_container_width=True, hide_index=True)
 
-start = st.button("▶ Iniciar automação", type="primary")
+start = st.button("â–¶ Iniciar automaÃ§Ã£o", type="primary")
 
 if start:
     status_box = st.empty()
@@ -431,7 +411,7 @@ if start:
         if st.session_state.attach:
             status_box.info("Testando porta do Chrome...")
             if not port_open("127.0.0.1", int(st.session_state.debug_port)):
-                status_box.warning("Não tem Chrome na porta informada. Vou abrir um Chrome novo.")
+                status_box.warning("NÃ£o tem Chrome na porta informada. Vou abrir um Chrome novo.")
                 driver = make_driver_new()
                 driver.get(URL)
             else:
@@ -445,7 +425,7 @@ if start:
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
 
-        status_box.success("Executando automação...")
+        status_box.success("Executando automaÃ§Ã£o...")
         for i, c in enumerate(clients, start=1):
             status_box.info(f"Processando {i}/{len(clients)}: {c.nome}")
             r = run_one_client(driver, c, log)
@@ -454,8 +434,8 @@ if start:
 
         status_box.success("Finalizado!")
     except Exception as e:
-        status_box.error(f"Erro na automação: {e}")
-        log("⚠️ Se o template não tiver 3 variáveis ou a ordem for diferente, me avise que eu mapeio pelo label.")
+        status_box.error(f"Erro na automaÃ§Ã£o: {e}")
+        log("âš ï¸ Se o template nÃ£o tiver 3 variÃ¡veis ou a ordem for diferente, me avise que eu mapeio pelo label.")
     finally:
         pass
 
