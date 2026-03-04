@@ -21,6 +21,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 URL = "https://chat.sonax.net.br/app/omnichannel/chat"
+SONAX_CLICK_DELAY_S = 1.2
+SONAX_PAGE_LOAD_DELAY_S = 2.0
 
 
 @dataclass
@@ -209,13 +211,25 @@ def maybe_close_popup(driver) -> bool:
         return False
 
 
-def click_retry(driver, by, value, tries=3, timeout=25):
+def wait_sonax_settle(driver, delay_s: float = SONAX_CLICK_DELAY_S):
+    try:
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
+        )
+    except Exception:
+        pass
+    time.sleep(delay_s)
+
+
+def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DELAY_S):
     last = None
     for _ in range(tries):
         try:
             el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, value)))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
             el.click()
+            if post_wait:
+                wait_sonax_settle(driver, post_wait)
             return el
         except Exception as e:
             last = e
@@ -224,7 +238,7 @@ def click_retry(driver, by, value, tries=3, timeout=25):
     raise last
 
 
-def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, timeout=25):
+def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, timeout=25, post_wait=0):
     last = None
     for _ in range(tries):
         try:
@@ -237,6 +251,8 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
             el.send_keys(text)
             if press_enter:
                 el.send_keys(Keys.ENTER)
+            if post_wait:
+                wait_sonax_settle(driver, post_wait)
             return el
         except Exception as e:
             last = e
@@ -264,6 +280,7 @@ def ensure_sonax_tab(driver):
     WebDriverWait(driver, 30).until(
         lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
     )
+    time.sleep(SONAX_PAGE_LOAD_DELAY_S)
 
 
 # Seleção Sonax
@@ -324,8 +341,7 @@ def run_one_client(driver, client: Cliente, log):
     for ph in phone_variations(client.telefone):
         log(f"🔎 {client.nome}: Buscar {ph}")
         click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
-        type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30)
-        time.sleep(0.9)
+        type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5)
         if click_card_contact(driver, ph):
             found = True
             break
@@ -474,7 +490,7 @@ clients = clients[: int(st.session_state.max_items)]
 st.success(f"Clientes carregados: {len(clients)}")
 
 with st.expander("Ver clientes identificados", expanded=False):
-    st.dataframe(pd.DataFrame([c.__dict__ for c in clients]), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame([c.__dict__ for c in clients]), width="stretch", hide_index=True)
 
 start = st.button("▶ Iniciar automação", type="primary")
 
@@ -526,7 +542,7 @@ if start:
     if results:
         rdf = pd.DataFrame(results)
         st.subheader("Resultado")
-        st.dataframe(rdf, use_container_width=True, hide_index=True)
+        st.dataframe(rdf, width="stretch", hide_index=True)
         st.download_button(
             "Baixar resultado (.csv)",
             data=rdf.to_csv(index=False).encode("utf-8-sig"),
