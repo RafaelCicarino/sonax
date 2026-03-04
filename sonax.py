@@ -34,8 +34,9 @@ class Cliente:
     horario: str = ""  # data
 
 
-PHONE_RE = re.compile(r"(?:\+?55)?\s*\(?\d{2}\)?\s*\d{4,5}-?\d{4}")
+PHONE_RE = re.compile(r"(?:\+?55)?\D*\d{2}\D*(?:\d\D*)?\d{4,5}\D*\d{4,5}")
 PLATE_CANDIDATE_RE = re.compile(r"\b[A-Z]{3}[A-Z0-9]{4,5}\b", re.IGNORECASE)
+ADDRESS_RE = re.compile(r"(?i)(?:^|[\s:,-])(r\.|rua|avenida|av\.|rodovia|estrada)(?:\s|$)")
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -49,12 +50,41 @@ def normalize_phone(raw: str) -> Optional[str]:
     return None
 
 
+def find_phone_in_text(text: str) -> Optional[str]:
+    labeled = re.search(r"(?im)^\s*telefone\s*:\s*(.+)$", text)
+    if labeled:
+        phone = normalize_phone(labeled.group(1))
+        if phone:
+            return phone
+
+    for raw in PHONE_RE.findall(text):
+        phone = normalize_phone(raw)
+        if phone:
+            return phone
+    return None
+
+
+def strip_ninth_digit_after_31(phone: str) -> str:
+    d = re.sub(r"\D+", "", phone)
+    if len(d) == 11 and d.startswith("31") and d[2] == "9":
+        return d[:2] + d[3:]
+    if len(d) == 13 and d.startswith("5531") and d[4] == "9":
+        return d[:4] + d[5:]
+    return d
+
+
 def phone_variations(phone: str) -> List[str]:
     d = re.sub(r"\D+", "", phone)
     out = []
+    ddd31_without_nine = strip_ninth_digit_after_31(d)
+
     if len(d) == 11:
+        if ddd31_without_nine != d:
+            out += [ddd31_without_nine, "55" + ddd31_without_nine]
         out += [d, "55" + d]
     elif len(d) == 13 and d.startswith("55"):
+        if ddd31_without_nine != d:
+            out += [ddd31_without_nine, ddd31_without_nine[2:]]
         out += [d, d[2:]]
     else:
         out += [d]
@@ -114,8 +144,7 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
 
     joined = "\n".join(lines)
 
-    mph = PHONE_RE.search(joined)
-    phone = normalize_phone(mph.group(0)) if mph else None
+    phone = find_phone_in_text(joined)
     plate = find_plate_in_text(joined)
 
     nome = ""
@@ -124,17 +153,19 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
             continue
         if "placa" in ln.lower():
             continue
-        if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
+        if "último posicionamento" in ln.lower():
             continue
-        nome = ln
+        if ADDRESS_RE.search(ln):
+            continue
+        nome = re.sub(r"(?i)^\s*cliente\s*:\s*", "", ln).strip()
         break
     if not nome:
         nome = "Sem nome"
 
     endereco = ""
     for ln in lines:
-        if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
-            endereco = ln
+        if ADDRESS_RE.search(ln):
+            endereco = re.sub(r"(?i)^\s*último posicionamento\s*:\s*", "", ln).strip()
             break
 
     data = ""
