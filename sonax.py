@@ -10,6 +10,7 @@ from typing import List, Optional
 import pandas as pd
 import streamlit as st
 from docx import Document
+import streamlit.components.v1 as components
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -115,7 +116,6 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     phone = normalize_phone(mph.group(0)) if mph else None
     plate = find_plate_in_text(joined)
 
-    # nome
     nome = ""
     for ln in lines[:6]:
         if phone and phone[-11:] in re.sub(r"\D+", "", ln):
@@ -129,14 +129,12 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     if not nome:
         nome = "Sem nome"
 
-    # endereço (primeira linha com rua/av)
     endereco = ""
     for ln in lines:
         if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
             endereco = ln
             break
 
-    # data (dd/mm/aaaa)
     data = ""
     mdate = re.search(r"\b\d{2}/\d{2}/\d{4}\b", joined)
     if mdate:
@@ -183,7 +181,6 @@ def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
         return False
 
 
-# bloqueando popups
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts = Options()
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
@@ -269,7 +266,7 @@ def ensure_sonax_tab(driver):
     )
 
 
-# Seleção
+# Seleção Sonax
 SEL_CONTATOS = (By.XPATH, "//a[contains(@class,'nav-link')][contains(.,'Contatos')]")
 SEL_BUSCA = (By.CSS_SELECTOR, "input.form-control.input-search")
 SEL_CONVERSAR = (By.CSS_SELECTOR, "button#dropdownBasic1")
@@ -279,8 +276,6 @@ SEL_TEMPLATE = (
     By.XPATH,
     "//span[contains(@class,'ng-option-label') and normalize-space(.)='abertura_de_diagnostico_tagpro']",
 )
-
-# ⚠️ esse placeholder depende do texto EXATO do site. Com UTF-8 corrigido fica:
 SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variável aqui']")
 SEL_ENVIAR = (By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space(.)='Enviar']")
 
@@ -303,10 +298,6 @@ def click_card_contact(driver, phone_digits: str) -> bool:
 
 
 def fill_template_variables_in_order(driver, placa: str, data: str, endereco: str):
-    """
-    Como os 3 campos são iguais, preenche pela ORDEM:
-    [0]=placa, [1]=data, [2]=endereço
-    """
     inputs = WebDriverWait(driver, 25).until(lambda d: d.find_elements(*SEL_VAR_INPUTS))
     if len(inputs) < 3:
         raise RuntimeError(f"Esperava 3 campos de variável, mas encontrei {len(inputs)}.")
@@ -369,8 +360,13 @@ def run_one_client(driver, client: Cliente, log):
     return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "OK"}
 
 
-# UI
+# =========================
+# UI (PT-BR)
+# =========================
+
 st.set_page_config(page_title="Sonax Automação Kezia", layout="wide")
+
+# CSS: sem [class*="st-"] (corrige o bug do texto duplicado)
 st.markdown(
     """
 <style>
@@ -378,16 +374,79 @@ section[data-testid="stSidebar"] { display: none !important; }
 div[data-testid="collapsedControl"] { display: none !important; }
 .block-container { padding-top: 1.2rem; }
 
-/* Fonte com suporte a emojis (principalmente Windows) */
-html, body, [class*="st-"] {
-  font-family: "Segoe UI", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+html, body {
+  font-family: "Segoe UI", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif !important;
+}
+
+input, textarea, [contenteditable="true"] {
+  text-shadow: none !important;
+  -webkit-text-stroke: 0 !important;
 }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-st.title("Sonax • Automação da KESIA")
+# JS: traduz textos do file_uploader (Browse files, Drag and drop..., Limit...)
+components.html(
+    """
+<script>
+(function() {
+  const PT = {
+    browse: "Selecionar arquivo",
+    drop: "Arraste e solte o arquivo aqui",
+    limit: "Limite de 200MB por arquivo • DOCX"
+  };
+
+  function applyPT() {
+    // tenta localizar todas as áreas de uploader na página
+    const uploaders = parent.document.querySelectorAll('[data-testid="stFileUploader"]');
+    uploaders.forEach(u => {
+      // botão
+      const btn = u.querySelector('button');
+      if (btn) {
+        const span = btn.querySelector('span') || btn;
+        if (span && span.innerText && span.innerText.toLowerCase().includes('browse')) {
+          span.innerText = PT.browse;
+        }
+      }
+
+      // dropzone
+      const drop = u.querySelector('[data-testid="stFileUploaderDropzone"]');
+      if (drop) {
+        // texto principal (p/div)
+        const nodes = drop.querySelectorAll('p, div, span');
+        nodes.forEach(n => {
+          const t = (n.innerText || '').trim().toLowerCase();
+          if (t === 'drag and drop file here' || t.includes('drag and drop')) {
+            n.innerText = PT.drop;
+          }
+        });
+
+        // linha do limite (small)
+        const smalls = drop.querySelectorAll('small');
+        smalls.forEach(s => {
+          const t = (s.innerText || '').trim().toLowerCase();
+          if (t.includes('limit') && (t.includes('per file') || t.includes('file'))) {
+            s.innerText = PT.limit;
+          }
+        });
+      }
+    });
+  }
+
+  // aplica agora e fica observando mudanças (Streamlit re-renderiza)
+  applyPT();
+
+  const obs = new MutationObserver(() => applyPT());
+  obs.observe(parent.document.body, { childList: true, subtree: true });
+})();
+</script>
+""",
+    height=0,
+)
+
+st.title("Sonax • Automação da KEZIA")
 
 st.session_state.setdefault("attach", True)
 st.session_state.setdefault("debug_port", 9222)
@@ -404,7 +463,7 @@ with st.expander("Configurar", expanded=False):
 
 st.markdown("---")
 
-uploaded = st.file_uploader("📄 Envie o Arquivo DOCX com os clientes", type=["docx"])
+uploaded = st.file_uploader("📄 Envie o arquivo DOCX com os clientes", type=["docx"])
 if not uploaded:
     st.info("Envie o arquivo para carregar os clientes.")
     st.stop()
@@ -436,7 +495,7 @@ if start:
         if st.session_state.attach:
             status_box.info("Testando porta do Chrome...")
             if not port_open("127.0.0.1", int(st.session_state.debug_port)):
-                status_box.warning("Não tem Chrome na porta informada. Vou abrir um Chrome novo.")
+                status_box.warning("Não encontrei Chrome na porta informada. Vou abrir um Chrome novo.")
                 driver = make_driver_new()
                 driver.get(URL)
             else:
@@ -470,7 +529,7 @@ if start:
         st.dataframe(rdf, use_container_width=True, hide_index=True)
         st.download_button(
             "Baixar resultado (.csv)",
-            data=rdf.to_csv(index=False).encode("utf-8-sig"),  # BOM pro Excel
+            data=rdf.to_csv(index=False).encode("utf-8-sig"),
             file_name="resultado_sonax.csv",
             mime="text/csv",
         )
