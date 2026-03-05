@@ -259,8 +259,16 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
+def _supports_local_debug_attach() -> bool:
+    # Attach ao Chrome via porta local depende de navegador na mesma maquina do app.
+    # No deploy Linux (ex.: Streamlit Cloud), isso nao existe.
+    return sys.platform.startswith(("win", "darwin"))
+
+
 def _is_headless_server_runtime() -> bool:
-    return _is_linux() and not os.getenv("DISPLAY")
+    if _supports_local_debug_attach():
+        return False
+    return _is_linux()
 
 
 def _find_chromedriver_path() -> Optional[str]:
@@ -705,8 +713,8 @@ if start:
     driver = None
 
     try:
-        if _is_headless_server_runtime() and st.session_state.attach:
-            status_box.info("Deploy sem interface gráfica: ignorando anexo à porta local do Chrome.")
+        if not _supports_local_debug_attach() and st.session_state.attach:
+            status_box.info("Deploy sem interface grafica: ignorando anexo a porta local do Chrome.")
             st.session_state.attach = False
 
         if st.session_state.attach:
