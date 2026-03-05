@@ -368,6 +368,30 @@ def _runtime_diagnostics() -> List[str]:
     return lines
 
 
+def _open_login_in_new_tab(url: str) -> None:
+    # Try to trigger a new tab from the user click that started the run.
+    components.html(
+        f"""
+        <script>
+          (function () {{
+            try {{
+              const w = window.open("{url}", "_blank", "noopener,noreferrer");
+              if (w) {{ w.focus(); }}
+            }} catch (e) {{
+              // Popup blocked: fallback link stays available below.
+            }}
+          }})();
+        </script>
+        """,
+        height=0,
+    )
+    st.caption("Se a aba nao abrir automaticamente, use o link abaixo.")
+    st.markdown(
+        f'<a href="{url}" target="_blank" rel="noopener noreferrer">Abrir login do Sonax em nova aba</a>',
+        unsafe_allow_html=True,
+    )
+
+
 def _start_chrome(opts: Options, service: Optional[Service] = None) -> webdriver.Chrome:
     if service:
         try:
@@ -738,6 +762,8 @@ with st.expander("Ver clientes identificados", expanded=False):
 start = st.button("▶ Iniciar automação", type="primary")
 
 if start:
+    if _is_headless_server_runtime():
+        _open_login_in_new_tab(URL)
     status_box = st.empty()
     log_box = st.empty()
     prog = st.progress(0)
