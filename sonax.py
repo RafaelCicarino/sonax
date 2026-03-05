@@ -28,8 +28,10 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
 URL = "https://chat.sonax.net.br/login"
-SONAX_CLICK_DELAY_S = 1.2
-SONAX_PAGE_LOAD_DELAY_S = 2.0
+SONAX_CLICK_DELAY_S = 0.35
+SONAX_PAGE_LOAD_DELAY_S = 0.8
+SONAX_RETRY_BACKOFF_S = 0.12
+SONAX_SEARCH_POST_WAIT_S = 0.55
 HEADLESS_LOGIN_TIMEOUT_S = 45.0
 PAGE_LOAD_TIMEOUT_S = 45.0
 
@@ -655,14 +657,33 @@ def maybe_close_popup(driver) -> bool:
         return False
 
 
+def wait_ui_idle(driver, timeout_s: float = 0.9, poll_s: float = 0.05) -> None:
+    end_at = time.time() + max(0.05, timeout_s)
+    while time.time() < end_at:
+        try:
+            is_idle = driver.execute_script(
+                """
+                const rs = document.readyState;
+                const busy = document.querySelector(
+                  '.loading, .spinner, .ngx-spinner-overlay, .cdk-overlay-backdrop-showing, .blockUI, .busy'
+                );
+                return (rs === 'interactive' || rs === 'complete') && !busy;
+                """
+            )
+            if is_idle:
+                return
+        except Exception:
+            return
+        time.sleep(poll_s)
+
+
 def wait_sonax_settle(driver, delay_s: float = SONAX_CLICK_DELAY_S):
     try:
-        WebDriverWait(driver, 10).until(
-            lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
-        )
+        wait_ui_idle(driver, timeout_s=0.9)
     except Exception:
         pass
-    time.sleep(delay_s)
+    if delay_s > 0:
+        time.sleep(delay_s)
 
 
 def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DELAY_S):
@@ -678,7 +699,7 @@ def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DE
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(0.25)
+            time.sleep(SONAX_RETRY_BACKOFF_S)
     raise last
 
 
@@ -701,7 +722,7 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(0.25)
+            time.sleep(SONAX_RETRY_BACKOFF_S)
     raise last
 
 
@@ -739,6 +760,21 @@ def _safe_get(driver, url: str, timeout_s: float = PAGE_LOAD_TIMEOUT_S) -> None:
         pass
 
 
+def _has_visible_password_input(driver) -> bool:
+    try:
+        pwd_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+    except Exception:
+        return False
+
+    for el in pwd_inputs:
+        try:
+            if el.is_displayed():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
     end_at = time.time() + timeout_s
     while time.time() < end_at:
@@ -747,7 +783,9 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
         except Exception:
             current_url = ""
 
-        if "/login" in current_url:
+        has_pwd_visible = _has_visible_password_input(driver)
+
+        if "/login" in current_url and has_pwd_visible:
             time.sleep(0.2)
             continue
 
@@ -758,9 +796,17 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
 
         # Se houver marcador claro de tela de login, ainda nao autenticou.
         try:
-            if driver.find_elements(*SEL_LOGIN_MARKERS):
+            if has_pwd_visible and driver.find_elements(*SEL_LOGIN_MARKERS):
                 time.sleep(0.2)
                 continue
+        except Exception:
+            pass
+
+        # Fallback: se ainda estiver no host do Sonax e nao houver campo de senha,
+        # considere sessao autenticada para evitar falso negativo por mudanca de rota/layout.
+        try:
+            if "sonax.net.br" in current_url and not has_pwd_visible:
+                return True
         except Exception:
             pass
 
@@ -844,11 +890,11 @@ def focus_busca(driver):
 def type_busca(driver, text: str):
     try:
         return type_retry(
-            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
+            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
         )
     except Exception:
         return type_retry(
-            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
+            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
         )
 
 
@@ -1195,9 +1241,9 @@ if start:
                     "Vou iniciar automaticamente quando a tela principal carregar."
                 )
                 if not wait_for_authenticated_sonax_session(driver, timeout_s=240.0):
-                    raise RuntimeError(
-                        "Login nao concluido em ate 240s. "
-                        "Apos entrar com usuario/senha, confirme se a tela mostra o menu Contatos."
+                    status_box.warning(
+                        "Nao consegui confirmar o login em ate 240s. "
+                        "Vou tentar continuar a automacao mesmo assim."
                     )
 
         status_box.success("Executando automação...")
