@@ -532,8 +532,26 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
             time.sleep(0.2)
             continue
 
+        # Fluxo autenticado atual do Sonax costuma cair diretamente nessa rota.
+        if "/app/omnichannel/chat" in current_url:
+            return True
+
+        # Se houver marcador claro de tela de login, ainda nao autenticou.
+        try:
+            if driver.find_elements(*SEL_LOGIN_MARKERS):
+                time.sleep(0.2)
+                continue
+        except Exception:
+            pass
+
         try:
             if driver.find_elements(*SEL_CONTATOS):
+                return True
+            if driver.find_elements(*SEL_CONTATOS_ALT):
+                return True
+            if driver.find_elements(*SEL_BUSCA):
+                return True
+            if driver.find_elements(*SEL_BUSCA_ALT):
                 return True
         except Exception:
             pass
@@ -541,9 +559,17 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
     return False
 
 
-# Seleção Sonax
+# Seleção Sonax (com fallback para pequenas variações de layout/texto)
 SEL_CONTATOS = (By.XPATH, "//a[contains(@class,'nav-link')][contains(.,'Contatos')]")
+SEL_CONTATOS_ALT = (
+    By.XPATH,
+    "//*[self::a or self::button or self::span][contains(translate(normalize-space(.),'CONTATOS','contatos'),'contatos')]",
+)
 SEL_BUSCA = (By.CSS_SELECTOR, "input.form-control.input-search")
+SEL_BUSCA_ALT = (
+    By.XPATH,
+    "//input[contains(@placeholder,'Busca') or contains(@placeholder,'Pesquisar') or contains(@placeholder,'Search') or contains(@class,'search')]",
+)
 SEL_CONVERSAR = (By.CSS_SELECTOR, "button#dropdownBasic1")
 SEL_LWSIMAPP = (By.XPATH, "//*[contains(@class,'ml-2') and contains(.,'LWSIMAPP')]")
 SEL_COMBOBOX = (By.CSS_SELECTOR, "input[role='combobox']")
@@ -554,6 +580,14 @@ SEL_TEMPLATE = (
 SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variável aqui']")
 SEL_ENVIAR = (By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space(.)='Enviar']")
 SEL_STATUS_BADGE = (By.CSS_SELECTOR, "span.badge.badge-secondary")
+SEL_LOGIN_MARKERS = (
+    By.XPATH,
+    (
+        "//*[contains(translate(normalize-space(.),'USUÁRIOABCDEFGHIJKLMNOPQRSTUVWXYZ','usuárioabcdefghijklmnopqrstuvwxyz'),'usuário') "
+        "or contains(translate(normalize-space(.),'USUARIOABCDEFGHIJKLMNOPQRSTUVWXYZ','usuarioabcdefghijklmnopqrstuvwxyz'),'usuario') "
+        "or contains(translate(normalize-space(.),'INFORMEABCDEFGHIJKLMNOPQRSTUVWXYZ','informeabcdefghijklmnopqrstuvwxyz'),'informe seu usuário')]"
+    ),
+)
 
 
 def click_card_contact(driver, phone_digits: str) -> bool:
@@ -571,6 +605,55 @@ def click_card_contact(driver, phone_digits: str) -> bool:
             return True
         except Exception:
             return False
+
+
+def click_contatos(driver):
+    try:
+        return click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
+    except Exception:
+        return click_retry(driver, *SEL_CONTATOS_ALT, tries=3, timeout=30)
+
+
+def focus_busca(driver):
+    try:
+        return click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
+    except Exception:
+        return click_retry(driver, *SEL_BUSCA_ALT, tries=3, timeout=30)
+
+
+def type_busca(driver, text: str):
+    try:
+        return type_retry(
+            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
+        )
+    except Exception:
+        return type_retry(
+            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
+        )
+
+
+def wait_for_authenticated_sonax_session(driver, timeout_s: float = 180.0) -> bool:
+    end_at = time.time() + timeout_s
+    while time.time() < end_at:
+        if has_authenticated_sonax_session(driver, timeout_s=0.6):
+            return True
+        maybe_close_popup(driver)
+        time.sleep(0.25)
+    return False
+
+
+def in_contacts_context(driver) -> bool:
+    try:
+        if driver.find_elements(*SEL_BUSCA):
+            return True
+    except Exception:
+        pass
+    try:
+        if driver.find_elements(*SEL_BUSCA_ALT):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def fill_template_variables_in_order(driver, placa: str, data: str, endereco: str):
@@ -635,14 +718,15 @@ def run_one_client(driver, client: Cliente, log):
     maybe_close_popup(driver)
 
     log(f"➡️ {client.nome}: Contatos")
-    click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
+    if not in_contacts_context(driver):
+        click_contatos(driver)
     maybe_close_popup(driver)
 
     found = False
     for ph in phone_variations(client.telefone):
         log(f"🔎 {client.nome}: Buscar {ph}")
-        click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
-        type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5)
+        focus_busca(driver)
+        type_busca(driver, ph)
         if click_card_contact(driver, ph):
             found = True
             break
@@ -861,12 +945,24 @@ if start:
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
 
-        if _is_headless_server_runtime() and not has_authenticated_sonax_session(driver):
-            raise RuntimeError(
-                "Sessao nao autenticada no navegador headless do deploy. "
-                "O login feito no seu navegador local nao e compartilhado com o servidor. "
-                "Para login manual, execute o app localmente no seu computador."
-            )
+        if _is_headless_server_runtime():
+            if not has_authenticated_sonax_session(driver):
+                raise RuntimeError(
+                    "Sessao nao autenticada no navegador headless do deploy. "
+                    "O login feito no seu navegador local nao e compartilhado com o servidor. "
+                    "Para login manual, execute o app localmente no seu computador."
+                )
+        else:
+            if not has_authenticated_sonax_session(driver, timeout_s=2.0):
+                status_box.warning(
+                    "Faça login no Sonax na janela do Chrome aberta e aguarde. "
+                    "Vou iniciar automaticamente quando a tela principal carregar."
+                )
+                if not wait_for_authenticated_sonax_session(driver, timeout_s=240.0):
+                    raise RuntimeError(
+                        "Login nao concluido em ate 240s. "
+                        "Apos entrar com usuario/senha, confirme se a tela mostra o menu Contatos."
+                    )
 
         status_box.success("Executando automação...")
         for i, c in enumerate(clients, start=1):
