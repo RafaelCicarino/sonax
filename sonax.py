@@ -6,6 +6,7 @@ import socket
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from io import BytesIO
@@ -370,6 +371,11 @@ def _runtime_diagnostics() -> List[str]:
     lines.append(f"ChromeDriver detectado: {_find_chromedriver_path() or '(nao encontrado)'}")
     user, pwd = _get_headless_login_credentials()
     lines.append(f"Credenciais Sonax no deploy: {'configuradas' if user and pwd else 'nao configuradas'}")
+    secret_paths = _available_secret_paths()
+    lines.append(
+        "Secrets detectados: "
+        + (", ".join(secret_paths[:20]) if secret_paths else "(nenhum)")
+    )
     host = _url_host(URL)
     lines.append(f"Host Sonax ({host}) alcancavel: {'sim' if _host_reachable(host) else 'nao'}")
     return lines
@@ -378,20 +384,74 @@ def _runtime_diagnostics() -> List[str]:
 def _read_secret_value(key: str) -> str:
     try:
         val = st.secrets.get(key, "")
-        return str(val).strip() if val is not None else ""
+        if val is not None and not isinstance(val, Mapping):
+            return str(val).strip()
+        for k, v in st.secrets.items():
+            if str(k).strip().lower() == key.strip().lower():
+                if v is not None and not isinstance(v, Mapping):
+                    return str(v).strip()
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _read_nested_secret_value(section: str, key: str) -> str:
     try:
         block = st.secrets.get(section, {})
-        if isinstance(block, dict):
+        if not isinstance(block, Mapping):
+            for sec_key, sec_val in st.secrets.items():
+                if str(sec_key).strip().lower() == section.strip().lower() and isinstance(sec_val, Mapping):
+                    block = sec_val
+                    break
+        if isinstance(block, Mapping):
             val = block.get(key, "")
-            return str(val).strip() if val is not None else ""
+            if val is not None and not isinstance(val, Mapping):
+                return str(val).strip()
+            for k, v in block.items():
+                if str(k).strip().lower() == key.strip().lower():
+                    if v is not None and not isinstance(v, Mapping):
+                        return str(v).strip()
     except Exception:
         pass
     return ""
+
+
+def _iter_secret_leaf_values(data, path: str = ""):
+    if isinstance(data, Mapping):
+        for k, v in data.items():
+            k_str = str(k).strip()
+            next_path = f"{path}.{k_str}" if path else k_str
+            if isinstance(v, Mapping):
+                yield from _iter_secret_leaf_values(v, next_path)
+            elif v is not None:
+                yield next_path, k_str, str(v).strip()
+
+
+def _find_secret_value_by_aliases(aliases: set[str], require_sonax_in_path: bool = False) -> str:
+    try:
+        for path, key, value in _iter_secret_leaf_values(st.secrets):
+            if not value:
+                continue
+            key_norm = re.sub(r"[^a-z0-9]+", "", key.lower())
+            path_norm = re.sub(r"[^a-z0-9]+", "", path.lower())
+            if key_norm in aliases:
+                if require_sonax_in_path and "sonax" not in path_norm:
+                    continue
+                return value
+    except Exception:
+        pass
+    return ""
+
+
+def _available_secret_paths() -> List[str]:
+    out = []
+    try:
+        for path, _, value in _iter_secret_leaf_values(st.secrets):
+            if value:
+                out.append(path)
+    except Exception:
+        pass
+    return out
 
 
 def _get_headless_login_credentials() -> tuple[str, str]:
@@ -403,6 +463,14 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or _read_nested_secret_value("sonax", "username")
         or _read_nested_secret_value("sonax", "user")
         or _read_nested_secret_value("sonax", "login")
+        or _read_nested_secret_value("credentials", "SONAX_USERNAME")
+        or _read_nested_secret_value("credentials", "SONAX_USER")
+        or _read_nested_secret_value("credentials", "SONAX_LOGIN")
+        or _read_nested_secret_value("auth", "SONAX_USERNAME")
+        or _read_nested_secret_value("auth", "SONAX_USER")
+        or _read_nested_secret_value("auth", "SONAX_LOGIN")
+        or _find_secret_value_by_aliases({"sonaxusername", "sonaxuser", "sonaxlogin"})
+        or _find_secret_value_by_aliases({"username", "user", "login"}, require_sonax_in_path=True)
         or (os.getenv("SONAX_USERNAME") or "").strip()
         or (os.getenv("SONAX_USER") or "").strip()
         or (os.getenv("SONAX_LOGIN") or "").strip()
@@ -412,6 +480,12 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or _read_secret_value("SONAX_PASS")
         or _read_nested_secret_value("sonax", "password")
         or _read_nested_secret_value("sonax", "pass")
+        or _read_nested_secret_value("credentials", "SONAX_PASSWORD")
+        or _read_nested_secret_value("credentials", "SONAX_PASS")
+        or _read_nested_secret_value("auth", "SONAX_PASSWORD")
+        or _read_nested_secret_value("auth", "SONAX_PASS")
+        or _find_secret_value_by_aliases({"sonaxpassword", "sonaxpass"})
+        or _find_secret_value_by_aliases({"password", "pass"}, require_sonax_in_path=True)
         or (os.getenv("SONAX_PASSWORD") or "").strip()
         or (os.getenv("SONAX_PASS") or "").strip()
     )
@@ -1064,9 +1138,12 @@ if start:
         if _is_headless_server_runtime():
             user, pwd = _get_headless_login_credentials()
             if not user or not pwd:
+                secret_paths = _available_secret_paths()
+                diag = ", ".join(secret_paths[:20]) if secret_paths else "nenhuma chave detectada"
                 raise RuntimeError(
                     "Credenciais nao configuradas no deploy. Defina SONAX_USERNAME e SONAX_PASSWORD "
-                    "em Settings > Secrets do Streamlit e rode novamente."
+                    "em Settings > Secrets do Streamlit e rode novamente. "
+                    f"Chaves detectadas: {diag}."
                 )
 
         if st.session_state.attach:
@@ -1107,7 +1184,7 @@ if start:
                     raise RuntimeError(
                         "Sessao nao autenticada no navegador headless do deploy. "
                         "Configure credenciais no servidor (st.secrets ou env): "
-                        "SONAX_USERNAME/SONAX_PASSWORD. "
+                        "SONAX_USERNAME/SONAX_PASSWORD (ou aliases SONAX_USER/SONAX_PASS). "
                         "O login do navegador local nao e compartilhado com o deploy. "
                         "Para login manual, execute o app localmente no seu computador."
                     )
