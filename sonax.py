@@ -6,6 +6,7 @@ import socket
 import os
 import shutil
 import sys
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from io import BytesIO
 from typing import List, Optional
@@ -302,6 +303,8 @@ def _configure_linux_runtime(opts: Options) -> None:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--remote-debugging-port=9222")
     opts.add_argument("--window-size=1920,1080")
     if not os.getenv("DISPLAY"):
         opts.add_argument("--headless=new")
@@ -331,6 +334,37 @@ def _build_chrome_service() -> Optional[Service]:
 
     path = _find_chromedriver_path()
     return Service(executable_path=path) if path else None
+
+
+def _url_host(raw_url: str) -> str:
+    try:
+        return (urlparse(raw_url).hostname or "").strip()
+    except Exception:
+        return ""
+
+
+def _host_reachable(host: str, timeout_s: float = 2.0) -> bool:
+    if not host:
+        return False
+    for port in (443, 80):
+        if port_open(host, port, timeout_s=timeout_s):
+            return True
+    return False
+
+
+def _runtime_diagnostics() -> List[str]:
+    lines = []
+    lines.append(f"OS: {sys.platform}")
+    lines.append(f"DISPLAY: {'set' if os.getenv('DISPLAY') else 'unset'}")
+    lines.append(f"CHROME_BINARY env: {(os.getenv('CHROME_BINARY') or '').strip() or '(vazio)'}")
+    lines.append(f"CHROMIUM_BINARY env: {(os.getenv('CHROMIUM_BINARY') or '').strip() or '(vazio)'}")
+    lines.append(f"CHROMEDRIVER_PATH env: {(os.getenv('CHROMEDRIVER_PATH') or '').strip() or '(vazio)'}")
+    lines.append(f"Chromium no PATH: {shutil.which('chromium') or '(nao encontrado)'}")
+    lines.append(f"Google Chrome no PATH: {shutil.which('google-chrome') or '(nao encontrado)'}")
+    lines.append(f"ChromeDriver detectado: {_find_chromedriver_path() or '(nao encontrado)'}")
+    host = _url_host(URL)
+    lines.append(f"Host Sonax ({host}) alcancavel: {'sim' if _host_reachable(host) else 'nao'}")
+    return lines
 
 
 def _start_chrome(opts: Options, service: Optional[Service] = None) -> webdriver.Chrome:
@@ -672,6 +706,9 @@ if _is_headless_server_runtime():
     st.caption(
         "Se precisar ver/interagir com a janela do navegador, execute este app localmente no seu Windows."
     )
+    with st.expander("Diagnóstico do deploy", expanded=False):
+        for ln in _runtime_diagnostics():
+            st.code(ln)
 
 with st.expander("Configurar", expanded=False):
     st.session_state.max_items = st.number_input(
@@ -729,6 +766,17 @@ if start:
         else:
             if _is_headless_server_runtime():
                 status_box.info("Iniciando Chromium headless no servidor de deploy...")
+                host = _url_host(URL)
+                if not _host_reachable(host):
+                    raise RuntimeError(
+                        f"O servidor de deploy nao alcanca {host}. "
+                        "Se esse sistema depende de rede interna/VPN, execute localmente."
+                    )
+                if not _find_chromedriver_path():
+                    raise RuntimeError(
+                        "ChromeDriver nao encontrado no deploy. "
+                        "Confirme packages.txt com chromium + chromium-driver."
+                    )
             else:
                 status_box.info("Abrindo Chrome novo no computador local...")
             driver = make_driver_new()
