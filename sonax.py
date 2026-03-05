@@ -22,6 +22,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException
 
 
 URL = "https://chat.sonax.net.br/app/omnichannel/chat"
@@ -263,17 +264,21 @@ def _find_chromedriver_path() -> Optional[str]:
     if env_path:
         return env_path
 
-    system_path = shutil.which("chromedriver")
-    if system_path:
-        return system_path
-
     for p in (
         "/usr/bin/chromedriver",
         "/usr/lib/chromium/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
         "/snap/bin/chromedriver",
     ):
         if os.path.exists(p):
             return p
+
+    system_path = shutil.which("chromedriver")
+    if system_path:
+        # Evita binário cacheado pelo Selenium Manager que pode quebrar no deploy
+        # (erro 127 por incompatibilidade com a imagem Linux).
+        if "/.cache/selenium/" not in system_path:
+            return system_path
     return None
 
 
@@ -284,6 +289,10 @@ def _configure_linux_runtime(opts: Options) -> None:
     # Stability flags for Linux containers/servers.
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    if not os.getenv("DISPLAY"):
+        opts.add_argument("--headless=new")
 
     chrome_bin = (
         (os.getenv("CHROME_BINARY") or "").strip()
@@ -293,7 +302,12 @@ def _configure_linux_runtime(opts: Options) -> None:
         opts.binary_location = chrome_bin
         return
 
-    for p in ("/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"):
+    for p in (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+    ):
         if os.path.exists(p):
             opts.binary_location = p
             break
@@ -304,13 +318,28 @@ def _build_chrome_service() -> Optional[Service]:
         return None
 
     path = _find_chromedriver_path()
-    if not path:
+    return Service(executable_path=path) if path else None
+
+
+def _start_chrome(opts: Options, service: Optional[Service] = None) -> webdriver.Chrome:
+    if service:
+        try:
+            return webdriver.Chrome(service=service, options=opts)
+        except WebDriverException as e:
+            # Fallback para Selenium Manager caso o chromedriver do sistema falhe.
+            last_err = str(e)
+            if "Status code was: 127" not in last_err:
+                raise
+
+    try:
+        return webdriver.Chrome(options=opts)
+    except Exception as e:
         raise RuntimeError(
-            "ChromeDriver não encontrado no Linux. Instale o pacote do sistema "
-            "(ex.: 'chromium-chromedriver' no Alpine ou 'chromium-driver' no Debian) "
-            "ou defina CHROMEDRIVER_PATH."
-        )
-    return Service(executable_path=path)
+            "Falha ao iniciar Chrome/ChromeDriver no Linux. "
+            "No deploy, instale Chromium + ChromeDriver do sistema e defina "
+            "CHROME_BINARY/CHROMEDRIVER_PATH quando necessário. "
+            f"Detalhe: {e}"
+        ) from e
 
 
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
@@ -320,9 +349,7 @@ def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts.add_argument("--disable-popup-blocking")
     _configure_linux_runtime(opts)
     service = _build_chrome_service()
-    if service:
-        return webdriver.Chrome(service=service, options=opts)
-    return webdriver.Chrome(options=opts)
+    return _start_chrome(opts, service=service)
 
 
 def make_driver_new() -> webdriver.Chrome:
@@ -332,9 +359,7 @@ def make_driver_new() -> webdriver.Chrome:
     opts.add_argument("--disable-popup-blocking")
     _configure_linux_runtime(opts)
     service = _build_chrome_service()
-    if service:
-        return webdriver.Chrome(service=service, options=opts)
-    return webdriver.Chrome(options=opts)
+    return _start_chrome(opts, service=service)
 
 
 def maybe_close_popup(driver) -> bool:
