@@ -43,6 +43,10 @@ ADDRESS_RE = re.compile(
     r"(?i)(?:^|[\s:,-])(r\.|rua|avenida|av\.?|rod\.?|rodovia|estrada)(?:\s|$)"
 )
 LAST_POSITION_RE = re.compile(r"(?i)^\s*último posicionamento\s*:\s*(.*)$")
+LAST_POSITION_FLEX_RE = re.compile(
+    r"(?i)\b(?:u[úu]ltim[oa]\s+posicionamento|u[úu]ltima\s+posi(?:ç|c)[aã]o)\s*:\s*(.+)$"
+)
+ADDRESS_TRAILING_DATETIME_RE = re.compile(r"\s*-\s*\d{2}/\d{2}/\d{4}(?:\s*,\s*\d{1,2}:\d{2})?\s*$")
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -143,6 +147,33 @@ def docx_lines_preserve_blanks(doc: Document) -> List[str]:
     return out
 
 
+def clean_address(raw: str) -> str:
+    if not raw:
+        return ""
+    txt = re.sub(r"\s+", " ", raw).strip(" -")
+    txt = ADDRESS_TRAILING_DATETIME_RE.sub("", txt).strip(" -")
+    return txt
+
+
+def extract_address(lines: List[str]) -> str:
+    for ln in lines:
+        mpos = LAST_POSITION_RE.search(ln) or LAST_POSITION_FLEX_RE.search(ln)
+        if mpos:
+            addr = clean_address((mpos.group(1) or "").strip())
+            if addr:
+                return addr
+
+    for ln in lines:
+        low = ln.lower()
+        if "cliente" in low or "placa" in low or "telefone" in low:
+            continue
+        if ADDRESS_RE.search(ln):
+            addr = clean_address(ln)
+            if addr:
+                return addr
+    return ""
+
+
 def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     lines = [ln.strip() for ln in block_lines if ln and ln.strip()]
     if not lines:
@@ -168,12 +199,7 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     if not nome:
         nome = "Sem nome"
 
-    endereco = ""
-    for ln in lines:
-        mpos = LAST_POSITION_RE.search(ln)
-        if mpos:
-            endereco = (mpos.group(1) or "").strip()
-            break
+    endereco = extract_address(lines)
 
     data = ""
     mdate = re.search(r"\b\d{2}/\d{2}/\d{4}\b", joined)
