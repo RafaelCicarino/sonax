@@ -24,7 +24,6 @@ URL = "https://chat.sonax.net.br/app/omnichannel/chat"
 SONAX_CLICK_DELAY_S = 1.2
 SONAX_PAGE_LOAD_DELAY_S = 2.0
 
-
 @dataclass
 class Cliente:
     nome: str
