@@ -25,7 +25,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException
 
 
-URL = "https://chat.sonax.net.br/app/omnichannel/chat"
+URL = "https://chat.sonax.net.br/login"
 SONAX_CLICK_DELAY_S = 1.2
 SONAX_PAGE_LOAD_DELAY_S = 2.0
 
@@ -425,7 +425,7 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
 
 
 def ensure_sonax_tab(driver):
-    target = "chat.sonax.net.br/app/omnichannel/chat"
+    target = "chat.sonax.net.br"
     for h in driver.window_handles:
         driver.switch_to.window(h)
         try:
