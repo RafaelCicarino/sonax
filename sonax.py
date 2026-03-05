@@ -661,6 +661,9 @@ if _is_headless_server_runtime():
         "Ambiente de deploy detectado (sem interface gráfica). "
         "O Chrome não abre no seu computador; ele roda em modo headless no servidor."
     )
+    st.caption(
+        "Se precisar ver/interagir com a janela do navegador, execute este app localmente no seu Windows."
+    )
 
 with st.expander("Configurar", expanded=False):
     st.session_state.max_items = st.number_input(
@@ -716,7 +719,10 @@ if start:
                 status_box.info("Conectando ao Chrome existente...")
                 driver = make_driver_attach(int(st.session_state.debug_port))
         else:
-            status_box.info("Abrindo Chrome novo...")
+            if _is_headless_server_runtime():
+                status_box.info("Iniciando Chromium headless no servidor de deploy...")
+            else:
+                status_box.info("Abrindo Chrome novo no computador local...")
             driver = make_driver_new()
             driver.get(URL)
 
