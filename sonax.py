@@ -520,6 +520,27 @@ def ensure_sonax_tab(driver):
     time.sleep(SONAX_PAGE_LOAD_DELAY_S)
 
 
+def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
+    end_at = time.time() + timeout_s
+    while time.time() < end_at:
+        try:
+            current_url = (driver.current_url or "").lower()
+        except Exception:
+            current_url = ""
+
+        if "/login" in current_url:
+            time.sleep(0.2)
+            continue
+
+        try:
+            if driver.find_elements(*SEL_CONTATOS):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
 # Seleção Sonax
 SEL_CONTATOS = (By.XPATH, "//a[contains(@class,'nav-link')][contains(.,'Contatos')]")
 SEL_BUSCA = (By.CSS_SELECTOR, "input.form-control.input-search")
@@ -792,8 +813,6 @@ with st.expander("Ver clientes identificados", expanded=False):
 start = st.button("▶ Iniciar automação", type="primary")
 
 if start:
-    if _is_headless_server_runtime():
-        _open_login_in_new_tab(URL)
     status_box = st.empty()
     log_box = st.empty()
     prog = st.progress(0)
@@ -841,6 +860,13 @@ if start:
 
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
+
+        if _is_headless_server_runtime() and not has_authenticated_sonax_session(driver):
+            raise RuntimeError(
+                "Sessao nao autenticada no navegador headless do deploy. "
+                "O login feito no seu navegador local nao e compartilhado com o servidor. "
+                "Para login manual, execute o app localmente no seu computador."
+            )
 
         status_box.success("Executando automação...")
         for i, c in enumerate(clients, start=1):
