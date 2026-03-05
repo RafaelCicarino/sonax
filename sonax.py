@@ -532,8 +532,9 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
             time.sleep(0.2)
             continue
 
-        # Fluxo autenticado atual do Sonax costuma cair diretamente nessa rota.
-        if "/app/omnichannel/chat" in current_url:
+        # O Sonax ja usou mais de uma rota apos login; aceite qualquer /app/...
+        # (exceto /login, tratado acima) para nao travar quando mudarem o caminho.
+        if "/app/" in current_url:
             return True
 
         # Se houver marcador claro de tela de login, ainda nao autenticou.
