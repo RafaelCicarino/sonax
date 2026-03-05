@@ -23,13 +23,14 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
 URL = "https://chat.sonax.net.br/login"
 SONAX_CLICK_DELAY_S = 1.2
 SONAX_PAGE_LOAD_DELAY_S = 2.0
 HEADLESS_LOGIN_TIMEOUT_S = 45.0
+PAGE_LOAD_TIMEOUT_S = 45.0
 
 @dataclass
 class Cliente:
@@ -548,6 +549,7 @@ def _start_chrome(opts: Options, service: Optional[Service] = None) -> webdriver
 
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts = Options()
+    opts.page_load_strategy = "eager"
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
@@ -558,6 +560,7 @@ def make_driver_attach(debug_port: int) -> webdriver.Chrome:
 
 def make_driver_new() -> webdriver.Chrome:
     opts = Options()
+    opts.page_load_strategy = "eager"
     opts.add_argument("--start-maximized")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
@@ -639,7 +642,7 @@ def ensure_sonax_tab(driver):
             pass
 
     try:
-        driver.get(URL)
+        _safe_get(driver, URL, timeout_s=PAGE_LOAD_TIMEOUT_S)
     except Exception:
         driver.execute_script(f"window.open('{URL}','_blank');")
         driver.switch_to.window(driver.window_handles[-1])
@@ -648,6 +651,18 @@ def ensure_sonax_tab(driver):
         lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
     )
     time.sleep(SONAX_PAGE_LOAD_DELAY_S)
+
+
+def _safe_get(driver, url: str, timeout_s: float = PAGE_LOAD_TIMEOUT_S) -> None:
+    try:
+        driver.set_page_load_timeout(timeout_s)
+    except Exception:
+        pass
+    try:
+        driver.get(url)
+    except TimeoutException:
+        # Com "eager" e timeout curto evitamos travar indefinidamente no deploy.
+        pass
 
 
 def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
@@ -1041,16 +1056,25 @@ if start:
     driver = None
 
     try:
+        status_box.info("Validando pré-requisitos...")
         if not _supports_local_debug_attach() and st.session_state.attach:
             status_box.info("Deploy sem interface grafica: ignorando anexo a porta local do Chrome.")
             st.session_state.attach = False
+
+        if _is_headless_server_runtime():
+            user, pwd = _get_headless_login_credentials()
+            if not user or not pwd:
+                raise RuntimeError(
+                    "Credenciais nao configuradas no deploy. Defina SONAX_USERNAME e SONAX_PASSWORD "
+                    "em Settings > Secrets do Streamlit e rode novamente."
+                )
 
         if st.session_state.attach:
             status_box.info("Testando porta do Chrome...")
             if not port_open("127.0.0.1", int(st.session_state.debug_port)):
                 status_box.warning("Não encontrei Chrome na porta informada. Vou abrir um Chrome novo.")
                 driver = make_driver_new()
-                driver.get(URL)
+                _safe_get(driver, URL)
             else:
                 status_box.info("Conectando ao Chrome existente...")
                 driver = make_driver_attach(int(st.session_state.debug_port))
@@ -1071,7 +1095,7 @@ if start:
             else:
                 status_box.info("Abrindo Chrome novo no computador local...")
             driver = make_driver_new()
-            driver.get(URL)
+            _safe_get(driver, URL)
 
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
