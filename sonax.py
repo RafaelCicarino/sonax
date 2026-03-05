@@ -306,7 +306,8 @@ def _configure_linux_runtime(opts: Options) -> None:
     opts.add_argument("--disable-software-rasterizer")
     opts.add_argument("--remote-debugging-port=9222")
     opts.add_argument("--window-size=1920,1080")
-    if not os.getenv("DISPLAY"):
+    # In deploy runtime we always force headless mode, regardless of DISPLAY.
+    if _is_headless_server_runtime() or not os.getenv("DISPLAY"):
         opts.add_argument("--headless=new")
 
     chrome_bin = (
