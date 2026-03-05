@@ -46,6 +46,7 @@ LAST_POSITION_RE = re.compile(r"(?i)^\s*último posicionamento\s*:\s*(.*)$")
 LAST_POSITION_FLEX_RE = re.compile(
     r"(?i)\b(?:u[úu]ltim[oa]\s+posicionamento|u[úu]ltima\s+posi(?:ç|c)[aã]o)\s*:\s*(.+)$"
 )
+ADDRESS_LABELED_RE = re.compile(r"(?i)\b(?:endere[çc]o|localiza[çc][aã]o)\s*:\s*(.+)$")
 ADDRESS_TRAILING_DATETIME_RE = re.compile(r"\s*-\s*\d{2}/\d{2}/\d{4}(?:\s*,\s*\d{1,2}:\d{2})?\s*$")
 
 
@@ -157,20 +158,26 @@ def clean_address(raw: str) -> str:
 
 def extract_address(lines: List[str]) -> str:
     for ln in lines:
-        mpos = LAST_POSITION_RE.search(ln) or LAST_POSITION_FLEX_RE.search(ln)
+        mpos = LAST_POSITION_RE.search(ln) or LAST_POSITION_FLEX_RE.search(ln) or ADDRESS_LABELED_RE.search(ln)
         if mpos:
             addr = clean_address((mpos.group(1) or "").strip())
             if addr:
                 return addr
 
     for ln in lines:
-        low = ln.lower()
-        if "cliente" in low or "placa" in low or "telefone" in low:
-            continue
         if ADDRESS_RE.search(ln):
             addr = clean_address(ln)
             if addr:
                 return addr
+
+        # Handles lines like: "Cliente: XXX - Rua X, 123"
+        low = ln.lower()
+        if "cliente" in low and " - " in ln:
+            tail = ln.split(" - ", 1)[1].strip()
+            if ADDRESS_RE.search(tail):
+                addr = clean_address(tail)
+                if addr:
+                    return addr
     return ""
 
 
@@ -450,14 +457,35 @@ def fill_template_variables_in_order(driver, placa: str, data: str, endereco: st
     if len(inputs) < 3:
         raise RuntimeError(f"Esperava 3 campos de variável, mas encontrei {len(inputs)}.")
 
+    def _set_value_with_fallback(el, value: str):
+        val = value or ""
+        el.click()
+        el.send_keys(Keys.CONTROL, "a")
+        el.send_keys(Keys.BACKSPACE)
+        if val:
+            el.send_keys(val)
+        current = (el.get_attribute("value") or "").strip()
+        if current == val.strip():
+            return
+        driver.execute_script(
+            """
+            const input = arguments[0];
+            const value = arguments[1] || '';
+            input.focus();
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+            """,
+            el,
+            val,
+        )
+
     values = [placa or "", data or "", endereco or ""]
     for i in range(3):
         el = inputs[i]
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        el.click()
-        el.send_keys(Keys.CONTROL, "a")
-        el.send_keys(Keys.BACKSPACE)
-        el.send_keys(values[i])
+        _set_value_with_fallback(el, values[i])
         time.sleep(0.1)
 
 
