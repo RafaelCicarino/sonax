@@ -529,6 +529,7 @@ SEL_TEMPLATE = (
 )
 SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variável aqui']")
 SEL_ENVIAR = (By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space(.)='Enviar']")
+SEL_STATUS_BADGE = (By.CSS_SELECTOR, "span.badge.badge-secondary")
 
 
 def click_card_contact(driver, phone_digits: str) -> bool:
@@ -585,6 +586,27 @@ def fill_template_variables_in_order(driver, placa: str, data: str, endereco: st
         time.sleep(0.1)
 
 
+def read_chat_status_badge(driver, timeout: float = 6.0) -> str:
+    end_at = time.time() + timeout
+    while time.time() < end_at:
+        try:
+            badges = driver.find_elements(*SEL_STATUS_BADGE)
+        except Exception:
+            badges = []
+
+        for b in badges:
+            try:
+                if not b.is_displayed():
+                    continue
+                txt = (b.text or "").strip().lower()
+                if txt in ("aberto", "fechado"):
+                    return txt
+            except Exception:
+                continue
+        time.sleep(0.2)
+    return ""
+
+
 def run_one_client(driver, client: Cliente, log):
     maybe_close_popup(driver)
 
@@ -610,6 +632,11 @@ def run_one_client(driver, client: Cliente, log):
     log(f"💬 {client.nome}: Conversar")
     click_retry(driver, *SEL_CONVERSAR, tries=3, timeout=30)
     maybe_close_popup(driver)
+
+    badge_status = read_chat_status_badge(driver, timeout=6.0)
+    if badge_status == "aberto":
+        log(f"⏭️ {client.nome}: status do atendimento em aberto (pulando)")
+        return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "EM ABERTO"}
 
     log(f"📲 {client.nome}: LWSIMAPP")
     click_retry(driver, *SEL_LWSIMAPP, tries=3, timeout=30)
