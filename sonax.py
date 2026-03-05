@@ -259,6 +259,10 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
+def _is_headless_server_runtime() -> bool:
+    return _is_linux() and not os.getenv("DISPLAY")
+
+
 def _find_chromedriver_path() -> Optional[str]:
     env_path = (os.getenv("CHROMEDRIVER_PATH") or "").strip()
     if env_path:
@@ -648,9 +652,15 @@ components.html(
 
 st.title("Sonax • Automação da KEZIA")
 
-st.session_state.setdefault("attach", True)
+st.session_state.setdefault("attach", not _is_headless_server_runtime())
 st.session_state.setdefault("debug_port", 9222)
 st.session_state.setdefault("max_items", 50)
+
+if _is_headless_server_runtime():
+    st.warning(
+        "Ambiente de deploy detectado (sem interface gráfica). "
+        "O Chrome não abre no seu computador; ele roda em modo headless no servidor."
+    )
 
 with st.expander("Configurar", expanded=False):
     st.session_state.max_items = st.number_input(
@@ -692,6 +702,10 @@ if start:
     driver = None
 
     try:
+        if _is_headless_server_runtime() and st.session_state.attach:
+            status_box.info("Deploy sem interface gráfica: ignorando anexo à porta local do Chrome.")
+            st.session_state.attach = False
+
         if st.session_state.attach:
             status_box.info("Testando porta do Chrome...")
             if not port_open("127.0.0.1", int(st.session_state.debug_port)):
