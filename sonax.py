@@ -35,7 +35,9 @@ class Cliente:
 
 PHONE_RE = re.compile(r"(?:\+?55)?\D*\d{2}\D*(?:\d\D*)?\d{4,5}\D*\d{4,5}")
 PLATE_CANDIDATE_RE = re.compile(r"\b[A-Z]{3}[A-Z0-9]{4,5}\b", re.IGNORECASE)
-ADDRESS_RE = re.compile(r"(?i)(?:^|[\s:,-])(r\.|rua|avenida|av\.|rodovia|estrada)(?:\s|$)")
+ADDRESS_RE = re.compile(
+    r"(?i)(?:^|[\s:,-])(r\.|rua|avenida|av\.?|rod\.?|rodovia|estrada)(?:\s|$)"
+)
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -165,6 +167,12 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     for ln in lines:
         if ADDRESS_RE.search(ln):
             endereco = re.sub(r"(?i)^\s*último posicionamento\s*:\s*", "", ln).strip()
+            # Remove data/hora anexada ao final do endereço (ex.: "... Brasil -04/03/2026, 15:59")
+            endereco = re.sub(
+                r"\s*[-–—]?\s*\d{2}/\d{2}/\d{4}(?:,\s*\d{2}:\d{2})?\s*$",
+                "",
+                endereco,
+            ).strip()
             break
 
     data = ""
