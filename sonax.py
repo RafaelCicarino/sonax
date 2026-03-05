@@ -3,6 +3,9 @@
 import re
 import time
 import socket
+import os
+import shutil
+import sys
 from dataclasses import dataclass
 from io import BytesIO
 from typing import List, Optional
@@ -16,6 +19,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -217,11 +221,74 @@ def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
         return False
 
 
+def _is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def _find_chromedriver_path() -> Optional[str]:
+    env_path = (os.getenv("CHROMEDRIVER_PATH") or "").strip()
+    if env_path:
+        return env_path
+
+    system_path = shutil.which("chromedriver")
+    if system_path:
+        return system_path
+
+    for p in (
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+        "/snap/bin/chromedriver",
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _configure_linux_runtime(opts: Options) -> None:
+    if not _is_linux():
+        return
+
+    # Stability flags for Linux containers/servers.
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+
+    chrome_bin = (
+        (os.getenv("CHROME_BINARY") or "").strip()
+        or (os.getenv("CHROMIUM_BINARY") or "").strip()
+    )
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+        return
+
+    for p in ("/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"):
+        if os.path.exists(p):
+            opts.binary_location = p
+            break
+
+
+def _build_chrome_service() -> Optional[Service]:
+    if not _is_linux():
+        return None
+
+    path = _find_chromedriver_path()
+    if not path:
+        raise RuntimeError(
+            "ChromeDriver não encontrado no Linux. Instale o pacote do sistema "
+            "(ex.: 'chromium-chromedriver' no Alpine ou 'chromium-driver' no Debian) "
+            "ou defina CHROMEDRIVER_PATH."
+        )
+    return Service(executable_path=path)
+
+
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts = Options()
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
+    _configure_linux_runtime(opts)
+    service = _build_chrome_service()
+    if service:
+        return webdriver.Chrome(service=service, options=opts)
     return webdriver.Chrome(options=opts)
 
 
@@ -230,6 +297,10 @@ def make_driver_new() -> webdriver.Chrome:
     opts.add_argument("--start-maximized")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
+    _configure_linux_runtime(opts)
+    service = _build_chrome_service()
+    if service:
+        return webdriver.Chrome(service=service, options=opts)
     return webdriver.Chrome(options=opts)
 
 
