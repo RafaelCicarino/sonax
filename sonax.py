@@ -29,6 +29,7 @@ from selenium.common.exceptions import WebDriverException
 URL = "https://chat.sonax.net.br/login"
 SONAX_CLICK_DELAY_S = 1.2
 SONAX_PAGE_LOAD_DELAY_S = 2.0
+HEADLESS_LOGIN_TIMEOUT_S = 45.0
 
 @dataclass
 class Cliente:
@@ -366,9 +367,138 @@ def _runtime_diagnostics() -> List[str]:
     lines.append(f"Chromium no PATH: {shutil.which('chromium') or '(nao encontrado)'}")
     lines.append(f"Google Chrome no PATH: {shutil.which('google-chrome') or '(nao encontrado)'}")
     lines.append(f"ChromeDriver detectado: {_find_chromedriver_path() or '(nao encontrado)'}")
+    user, pwd = _get_headless_login_credentials()
+    lines.append(f"Credenciais Sonax no deploy: {'configuradas' if user and pwd else 'nao configuradas'}")
     host = _url_host(URL)
     lines.append(f"Host Sonax ({host}) alcancavel: {'sim' if _host_reachable(host) else 'nao'}")
     return lines
+
+
+def _read_secret_value(key: str) -> str:
+    try:
+        val = st.secrets.get(key, "")
+        return str(val).strip() if val is not None else ""
+    except Exception:
+        return ""
+
+
+def _read_nested_secret_value(section: str, key: str) -> str:
+    try:
+        block = st.secrets.get(section, {})
+        if isinstance(block, dict):
+            val = block.get(key, "")
+            return str(val).strip() if val is not None else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _get_headless_login_credentials() -> tuple[str, str]:
+    # Prioridade: st.secrets -> env vars.
+    user = (
+        _read_secret_value("SONAX_USERNAME")
+        or _read_secret_value("SONAX_USER")
+        or _read_secret_value("SONAX_LOGIN")
+        or _read_nested_secret_value("sonax", "username")
+        or _read_nested_secret_value("sonax", "user")
+        or _read_nested_secret_value("sonax", "login")
+        or (os.getenv("SONAX_USERNAME") or "").strip()
+        or (os.getenv("SONAX_USER") or "").strip()
+        or (os.getenv("SONAX_LOGIN") or "").strip()
+    )
+    pwd = (
+        _read_secret_value("SONAX_PASSWORD")
+        or _read_secret_value("SONAX_PASS")
+        or _read_nested_secret_value("sonax", "password")
+        or _read_nested_secret_value("sonax", "pass")
+        or (os.getenv("SONAX_PASSWORD") or "").strip()
+        or (os.getenv("SONAX_PASS") or "").strip()
+    )
+    return user, pwd
+
+
+def _find_visible_input(driver, xpath: str):
+    for el in driver.find_elements(By.XPATH, xpath):
+        try:
+            if el.is_displayed() and el.is_enabled():
+                return el
+        except Exception:
+            continue
+    return None
+
+
+def _set_input_value(el, value: str):
+    el.click()
+    el.send_keys(Keys.CONTROL, "a")
+    el.send_keys(Keys.BACKSPACE)
+    el.send_keys(value or "")
+
+
+def try_headless_login_with_credentials(driver, timeout_s: float = HEADLESS_LOGIN_TIMEOUT_S) -> bool:
+    user, pwd = _get_headless_login_credentials()
+    if not user or not pwd:
+        return False
+
+    end_at = time.time() + timeout_s
+    while time.time() < end_at:
+        if has_authenticated_sonax_session(driver, timeout_s=0.8):
+            return True
+
+        user_input = _find_visible_input(
+            driver,
+            (
+                "//input[not(@type='password') and ("
+                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
+                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
+                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
+                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
+                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
+                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
+                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
+                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
+                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
+                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
+                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
+                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login'))]"
+            ),
+        )
+        if user_input is None:
+            user_input = _find_visible_input(
+                driver,
+                "//input[not(@type='password') and not(@type='hidden') and not(@disabled)]",
+            )
+
+        pwd_input = _find_visible_input(
+            driver,
+            "//input[@type='password' and not(@disabled)]",
+        )
+
+        if user_input is None or pwd_input is None:
+            time.sleep(0.4)
+            continue
+
+        _set_input_value(user_input, user)
+        _set_input_value(pwd_input, pwd)
+
+        submit = _find_visible_input(
+            driver,
+            (
+                "//button[@type='submit' or "
+                "contains(normalize-space(.),'Entrar') or contains(normalize-space(.),'entrar') or "
+                "contains(normalize-space(.),'Login') or contains(normalize-space(.),'login') or "
+                "contains(normalize-space(.),'Acessar') or contains(normalize-space(.),'acessar')]"
+            ),
+        )
+        if submit is not None:
+            submit.click()
+        else:
+            pwd_input.send_keys(Keys.ENTER)
+
+        if wait_for_authenticated_sonax_session(driver, timeout_s=8.0):
+            return True
+
+        time.sleep(0.4)
+    return False
 
 
 def _open_login_in_new_tab(url: str) -> None:
@@ -948,11 +1078,15 @@ if start:
 
         if _is_headless_server_runtime():
             if not has_authenticated_sonax_session(driver):
-                raise RuntimeError(
-                    "Sessao nao autenticada no navegador headless do deploy. "
-                    "O login feito no seu navegador local nao e compartilhado com o servidor. "
-                    "Para login manual, execute o app localmente no seu computador."
-                )
+                status_box.info("Sessao nao autenticada no deploy. Tentando login com credenciais do servidor...")
+                if not try_headless_login_with_credentials(driver):
+                    raise RuntimeError(
+                        "Sessao nao autenticada no navegador headless do deploy. "
+                        "Configure credenciais no servidor (st.secrets ou env): "
+                        "SONAX_USERNAME/SONAX_PASSWORD. "
+                        "O login do navegador local nao e compartilhado com o deploy. "
+                        "Para login manual, execute o app localmente no seu computador."
+                    )
         else:
             if not has_authenticated_sonax_session(driver, timeout_s=2.0):
                 status_box.warning(
