@@ -6,7 +6,6 @@ import socket
 import os
 import shutil
 import sys
-from collections.abc import Mapping
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from io import BytesIO
@@ -28,10 +27,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
 URL = "https://chat.sonax.net.br/login"
-SONAX_CLICK_DELAY_S = 0.35
-SONAX_PAGE_LOAD_DELAY_S = 0.8
-SONAX_RETRY_BACKOFF_S = 0.12
-SONAX_SEARCH_POST_WAIT_S = 0.55
+SONAX_CLICK_DELAY_S = 1.2
+SONAX_PAGE_LOAD_DELAY_S = 2.0
 HEADLESS_LOGIN_TIMEOUT_S = 45.0
 PAGE_LOAD_TIMEOUT_S = 45.0
 
@@ -373,11 +370,6 @@ def _runtime_diagnostics() -> List[str]:
     lines.append(f"ChromeDriver detectado: {_find_chromedriver_path() or '(nao encontrado)'}")
     user, pwd = _get_headless_login_credentials()
     lines.append(f"Credenciais Sonax no deploy: {'configuradas' if user and pwd else 'nao configuradas'}")
-    secret_paths = _available_secret_paths()
-    lines.append(
-        "Secrets detectados: "
-        + (", ".join(secret_paths[:20]) if secret_paths else "(nenhum)")
-    )
     host = _url_host(URL)
     lines.append(f"Host Sonax ({host}) alcancavel: {'sim' if _host_reachable(host) else 'nao'}")
     return lines
@@ -386,74 +378,20 @@ def _runtime_diagnostics() -> List[str]:
 def _read_secret_value(key: str) -> str:
     try:
         val = st.secrets.get(key, "")
-        if val is not None and not isinstance(val, Mapping):
-            return str(val).strip()
-        for k, v in st.secrets.items():
-            if str(k).strip().lower() == key.strip().lower():
-                if v is not None and not isinstance(v, Mapping):
-                    return str(v).strip()
+        return str(val).strip() if val is not None else ""
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _read_nested_secret_value(section: str, key: str) -> str:
     try:
         block = st.secrets.get(section, {})
-        if not isinstance(block, Mapping):
-            for sec_key, sec_val in st.secrets.items():
-                if str(sec_key).strip().lower() == section.strip().lower() and isinstance(sec_val, Mapping):
-                    block = sec_val
-                    break
-        if isinstance(block, Mapping):
+        if isinstance(block, dict):
             val = block.get(key, "")
-            if val is not None and not isinstance(val, Mapping):
-                return str(val).strip()
-            for k, v in block.items():
-                if str(k).strip().lower() == key.strip().lower():
-                    if v is not None and not isinstance(v, Mapping):
-                        return str(v).strip()
+            return str(val).strip() if val is not None else ""
     except Exception:
         pass
     return ""
-
-
-def _iter_secret_leaf_values(data, path: str = ""):
-    if isinstance(data, Mapping):
-        for k, v in data.items():
-            k_str = str(k).strip()
-            next_path = f"{path}.{k_str}" if path else k_str
-            if isinstance(v, Mapping):
-                yield from _iter_secret_leaf_values(v, next_path)
-            elif v is not None:
-                yield next_path, k_str, str(v).strip()
-
-
-def _find_secret_value_by_aliases(aliases: set[str], require_sonax_in_path: bool = False) -> str:
-    try:
-        for path, key, value in _iter_secret_leaf_values(st.secrets):
-            if not value:
-                continue
-            key_norm = re.sub(r"[^a-z0-9]+", "", key.lower())
-            path_norm = re.sub(r"[^a-z0-9]+", "", path.lower())
-            if key_norm in aliases:
-                if require_sonax_in_path and "sonax" not in path_norm:
-                    continue
-                return value
-    except Exception:
-        pass
-    return ""
-
-
-def _available_secret_paths() -> List[str]:
-    out = []
-    try:
-        for path, _, value in _iter_secret_leaf_values(st.secrets):
-            if value:
-                out.append(path)
-    except Exception:
-        pass
-    return out
 
 
 def _get_headless_login_credentials() -> tuple[str, str]:
@@ -465,14 +403,6 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or _read_nested_secret_value("sonax", "username")
         or _read_nested_secret_value("sonax", "user")
         or _read_nested_secret_value("sonax", "login")
-        or _read_nested_secret_value("credentials", "SONAX_USERNAME")
-        or _read_nested_secret_value("credentials", "SONAX_USER")
-        or _read_nested_secret_value("credentials", "SONAX_LOGIN")
-        or _read_nested_secret_value("auth", "SONAX_USERNAME")
-        or _read_nested_secret_value("auth", "SONAX_USER")
-        or _read_nested_secret_value("auth", "SONAX_LOGIN")
-        or _find_secret_value_by_aliases({"sonaxusername", "sonaxuser", "sonaxlogin"})
-        or _find_secret_value_by_aliases({"username", "user", "login"}, require_sonax_in_path=True)
         or (os.getenv("SONAX_USERNAME") or "").strip()
         or (os.getenv("SONAX_USER") or "").strip()
         or (os.getenv("SONAX_LOGIN") or "").strip()
@@ -482,16 +412,23 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or _read_secret_value("SONAX_PASS")
         or _read_nested_secret_value("sonax", "password")
         or _read_nested_secret_value("sonax", "pass")
-        or _read_nested_secret_value("credentials", "SONAX_PASSWORD")
-        or _read_nested_secret_value("credentials", "SONAX_PASS")
-        or _read_nested_secret_value("auth", "SONAX_PASSWORD")
-        or _read_nested_secret_value("auth", "SONAX_PASS")
-        or _find_secret_value_by_aliases({"sonaxpassword", "sonaxpass"})
-        or _find_secret_value_by_aliases({"password", "pass"}, require_sonax_in_path=True)
         or (os.getenv("SONAX_PASSWORD") or "").strip()
         or (os.getenv("SONAX_PASS") or "").strip()
     )
     return user, pwd
+
+
+def _headless_credentials_validation() -> tuple[str, str, List[str], List[str]]:
+    user, pwd = _get_headless_login_credentials()
+    missing = []
+    hints = []
+    if not user:
+        missing.append("usuario")
+        hints.append("SONAX_USERNAME (ou SONAX_USER / SONAX_LOGIN / [sonax].username)")
+    if not pwd:
+        missing.append("senha")
+        hints.append("SONAX_PASSWORD (ou SONAX_PASS / [sonax].password)")
+    return user, pwd, missing, hints
 
 
 def _find_visible_input(driver, xpath: str):
@@ -657,33 +594,14 @@ def maybe_close_popup(driver) -> bool:
         return False
 
 
-def wait_ui_idle(driver, timeout_s: float = 0.9, poll_s: float = 0.05) -> None:
-    end_at = time.time() + max(0.05, timeout_s)
-    while time.time() < end_at:
-        try:
-            is_idle = driver.execute_script(
-                """
-                const rs = document.readyState;
-                const busy = document.querySelector(
-                  '.loading, .spinner, .ngx-spinner-overlay, .cdk-overlay-backdrop-showing, .blockUI, .busy'
-                );
-                return (rs === 'interactive' || rs === 'complete') && !busy;
-                """
-            )
-            if is_idle:
-                return
-        except Exception:
-            return
-        time.sleep(poll_s)
-
-
 def wait_sonax_settle(driver, delay_s: float = SONAX_CLICK_DELAY_S):
     try:
-        wait_ui_idle(driver, timeout_s=0.9)
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
+        )
     except Exception:
         pass
-    if delay_s > 0:
-        time.sleep(delay_s)
+    time.sleep(delay_s)
 
 
 def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DELAY_S):
@@ -699,7 +617,7 @@ def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DE
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(SONAX_RETRY_BACKOFF_S)
+            time.sleep(0.25)
     raise last
 
 
@@ -722,7 +640,7 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(SONAX_RETRY_BACKOFF_S)
+            time.sleep(0.25)
     raise last
 
 
@@ -760,21 +678,6 @@ def _safe_get(driver, url: str, timeout_s: float = PAGE_LOAD_TIMEOUT_S) -> None:
         pass
 
 
-def _has_visible_password_input(driver) -> bool:
-    try:
-        pwd_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-    except Exception:
-        return False
-
-    for el in pwd_inputs:
-        try:
-            if el.is_displayed():
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
     end_at = time.time() + timeout_s
     while time.time() < end_at:
@@ -783,9 +686,7 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
         except Exception:
             current_url = ""
 
-        has_pwd_visible = _has_visible_password_input(driver)
-
-        if "/login" in current_url and has_pwd_visible:
+        if "/login" in current_url:
             time.sleep(0.2)
             continue
 
@@ -796,17 +697,9 @@ def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
 
         # Se houver marcador claro de tela de login, ainda nao autenticou.
         try:
-            if has_pwd_visible and driver.find_elements(*SEL_LOGIN_MARKERS):
+            if driver.find_elements(*SEL_LOGIN_MARKERS):
                 time.sleep(0.2)
                 continue
-        except Exception:
-            pass
-
-        # Fallback: se ainda estiver no host do Sonax e nao houver campo de senha,
-        # considere sessao autenticada para evitar falso negativo por mudanca de rota/layout.
-        try:
-            if "sonax.net.br" in current_url and not has_pwd_visible:
-                return True
         except Exception:
             pass
 
@@ -890,11 +783,11 @@ def focus_busca(driver):
 def type_busca(driver, text: str):
     try:
         return type_retry(
-            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
+            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
         )
     except Exception:
         return type_retry(
-            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
+            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=1.5
         )
 
 
@@ -1123,12 +1016,25 @@ st.title("Sonax • Automação da KEZIA")
 st.session_state.setdefault("attach", not _is_headless_server_runtime())
 st.session_state.setdefault("debug_port", 9222)
 st.session_state.setdefault("max_items", 50)
+runtime_mode = "deploy_headless" if _is_headless_server_runtime() else "local_interativo"
 
-if _is_headless_server_runtime():
+st.info(f"Modo de execução ativo: `{runtime_mode}`")
+
+if runtime_mode == "deploy_headless":
     st.warning(
         "Ambiente de deploy detectado (sem interface gráfica). "
         "O Chrome não abre no seu computador; ele roda em modo headless no servidor."
     )
+    user, pwd, missing, hints = _headless_credentials_validation()
+    if missing:
+        st.error(
+            "Credenciais do Sonax ausentes para o deploy. "
+            f"Faltando: {', '.join(missing)}. "
+            "Configure em Streamlit > Settings > Secrets."
+        )
+        st.code("\n".join(hints))
+    else:
+        st.success("Credenciais do Sonax para deploy: configuradas.")
     st.caption(
         "Se precisar ver/interagir com a janela do navegador, execute este app localmente no seu Windows."
     )
@@ -1181,15 +1087,14 @@ if start:
             status_box.info("Deploy sem interface grafica: ignorando anexo a porta local do Chrome.")
             st.session_state.attach = False
 
-        if _is_headless_server_runtime():
-            user, pwd = _get_headless_login_credentials()
-            if not user or not pwd:
-                secret_paths = _available_secret_paths()
-                diag = ", ".join(secret_paths[:20]) if secret_paths else "nenhuma chave detectada"
+        if runtime_mode == "deploy_headless":
+            user, pwd, missing, hints = _headless_credentials_validation()
+            if missing:
                 raise RuntimeError(
-                    "Credenciais nao configuradas no deploy. Defina SONAX_USERNAME e SONAX_PASSWORD "
-                    "em Settings > Secrets do Streamlit e rode novamente. "
-                    f"Chaves detectadas: {diag}."
+                    "Credenciais do Sonax ausentes no deploy. "
+                    f"Faltando: {', '.join(missing)}. "
+                    "Defina em Settings > Secrets. "
+                    f"Chaves aceitas: {'; '.join(hints)}."
                 )
 
         if st.session_state.attach:
@@ -1202,7 +1107,7 @@ if start:
                 status_box.info("Conectando ao Chrome existente...")
                 driver = make_driver_attach(int(st.session_state.debug_port))
         else:
-            if _is_headless_server_runtime():
+            if runtime_mode == "deploy_headless":
                 status_box.info("Iniciando Chromium headless no servidor de deploy...")
                 host = _url_host(URL)
                 if not _host_reachable(host):
@@ -1223,14 +1128,14 @@ if start:
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
 
-        if _is_headless_server_runtime():
+        if runtime_mode == "deploy_headless":
             if not has_authenticated_sonax_session(driver):
                 status_box.info("Sessao nao autenticada no deploy. Tentando login com credenciais do servidor...")
                 if not try_headless_login_with_credentials(driver):
                     raise RuntimeError(
                         "Sessao nao autenticada no navegador headless do deploy. "
                         "Configure credenciais no servidor (st.secrets ou env): "
-                        "SONAX_USERNAME/SONAX_PASSWORD (ou aliases SONAX_USER/SONAX_PASS). "
+                        "SONAX_USERNAME/SONAX_PASSWORD. "
                         "O login do navegador local nao e compartilhado com o deploy. "
                         "Para login manual, execute o app localmente no seu computador."
                     )
@@ -1241,9 +1146,9 @@ if start:
                     "Vou iniciar automaticamente quando a tela principal carregar."
                 )
                 if not wait_for_authenticated_sonax_session(driver, timeout_s=240.0):
-                    status_box.warning(
-                        "Nao consegui confirmar o login em ate 240s. "
-                        "Vou tentar continuar a automacao mesmo assim."
+                    raise RuntimeError(
+                        "Login nao concluido em ate 240s. "
+                        "Apos entrar com usuario/senha, confirme se a tela mostra o menu Contatos."
                     )
 
         status_box.success("Executando automação...")
