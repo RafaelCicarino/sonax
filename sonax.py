@@ -324,7 +324,7 @@ def _read_nested_secret_value(section: str, key: str) -> str:
 
 
 def _get_headless_login_credentials() -> tuple[str, str]:
-    default_user = "RAFAEL CICARINO"
+    default_user = "KEZIA"
     default_pwd = "12345678"
     user = (
         _read_secret_value("SONAX_USERNAME")
