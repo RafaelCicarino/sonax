@@ -3,11 +3,6 @@
 import re
 import time
 import socket
-import os
-import shutil
-import sys
-from collections.abc import Mapping
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from io import BytesIO
 from typing import List, Optional
@@ -15,25 +10,17 @@ from typing import List, Optional
 import pandas as pd
 import streamlit as st
 from docx import Document
-import streamlit.components.v1 as components
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
 
 
-URL = "https://chat.sonax.net.br/login"
-SONAX_CLICK_DELAY_S = 0.35
-SONAX_PAGE_LOAD_DELAY_S = 0.8
-SONAX_RETRY_BACKOFF_S = 0.12
-SONAX_SEARCH_POST_WAIT_S = 0.55
-HEADLESS_LOGIN_TIMEOUT_S = 45.0
-PAGE_LOAD_TIMEOUT_S = 45.0
+URL = "https://chat.sonax.net.br/app/omnichannel/chat"
+
 
 @dataclass
 class Cliente:
@@ -44,17 +31,8 @@ class Cliente:
     horario: str = ""  # data
 
 
-PHONE_RE = re.compile(r"(?:\+?55)?\D*\d{2}\D*(?:\d\D*)?\d{4,5}\D*\d{4,5}")
+PHONE_RE = re.compile(r"(?:\+?55)?\s*\(?\d{2}\)?\s*\d{4,5}-?\d{4}")
 PLATE_CANDIDATE_RE = re.compile(r"\b[A-Z]{3}[A-Z0-9]{4,5}\b", re.IGNORECASE)
-ADDRESS_RE = re.compile(
-    r"(?i)(?:^|[\s:,-])(r\.|rua|avenida|av\.?|rod\.?|rodovia|estrada)(?:\s|$)"
-)
-LAST_POSITION_RE = re.compile(r"(?i)^\s*último posicionamento\s*:\s*(.*)$")
-LAST_POSITION_FLEX_RE = re.compile(
-    r"(?i)\b(?:u[úu]ltim[oa]\s+posicionamento|u[úu]ltima\s+posi(?:ç|c)[aã]o)\s*:\s*(.+)$"
-)
-ADDRESS_LABELED_RE = re.compile(r"(?i)\b(?:endere[çc]o|localiza[çc][aã]o)\s*:\s*(.+)$")
-ADDRESS_TRAILING_DATETIME_RE = re.compile(r"\s*-\s*\d{2}/\d{2}/\d{4}(?:\s*,\s*\d{1,2}:\d{2})?\s*$")
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -68,41 +46,12 @@ def normalize_phone(raw: str) -> Optional[str]:
     return None
 
 
-def find_phone_in_text(text: str) -> Optional[str]:
-    labeled = re.search(r"(?im)^\s*telefone\s*:\s*(.+)$", text)
-    if labeled:
-        phone = normalize_phone(labeled.group(1))
-        if phone:
-            return phone
-
-    for raw in PHONE_RE.findall(text):
-        phone = normalize_phone(raw)
-        if phone:
-            return phone
-    return None
-
-
-def strip_ninth_digit_after_31(phone: str) -> str:
-    d = re.sub(r"\D+", "", phone)
-    if len(d) == 11 and d.startswith("31") and d[2] == "9":
-        return d[:2] + d[3:]
-    if len(d) == 13 and d.startswith("5531") and d[4] == "9":
-        return d[:4] + d[5:]
-    return d
-
-
 def phone_variations(phone: str) -> List[str]:
     d = re.sub(r"\D+", "", phone)
     out = []
-    ddd31_without_nine = strip_ninth_digit_after_31(d)
-
     if len(d) == 11:
-        if ddd31_without_nine != d:
-            out += [ddd31_without_nine, "55" + ddd31_without_nine]
         out += [d, "55" + d]
     elif len(d) == 13 and d.startswith("55"):
-        if ddd31_without_nine != d:
-            out += [ddd31_without_nine, ddd31_without_nine[2:]]
         out += [d, d[2:]]
     else:
         out += [d]
@@ -155,39 +104,6 @@ def docx_lines_preserve_blanks(doc: Document) -> List[str]:
     return out
 
 
-def clean_address(raw: str) -> str:
-    if not raw:
-        return ""
-    txt = re.sub(r"\s+", " ", raw).strip(" -")
-    txt = ADDRESS_TRAILING_DATETIME_RE.sub("", txt).strip(" -")
-    return txt
-
-
-def extract_address(lines: List[str]) -> str:
-    for ln in lines:
-        mpos = LAST_POSITION_RE.search(ln) or LAST_POSITION_FLEX_RE.search(ln) or ADDRESS_LABELED_RE.search(ln)
-        if mpos:
-            addr = clean_address((mpos.group(1) or "").strip())
-            if addr:
-                return addr
-
-    for ln in lines:
-        if ADDRESS_RE.search(ln):
-            addr = clean_address(ln)
-            if addr:
-                return addr
-
-        # Handles lines like: "Cliente: XXX - Rua X, 123"
-        low = ln.lower()
-        if "cliente" in low and " - " in ln:
-            tail = ln.split(" - ", 1)[1].strip()
-            if ADDRESS_RE.search(tail):
-                addr = clean_address(tail)
-                if addr:
-                    return addr
-    return ""
-
-
 def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     lines = [ln.strip() for ln in block_lines if ln and ln.strip()]
     if not lines:
@@ -195,26 +111,32 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
 
     joined = "\n".join(lines)
 
-    phone = find_phone_in_text(joined)
+    mph = PHONE_RE.search(joined)
+    phone = normalize_phone(mph.group(0)) if mph else None
     plate = find_plate_in_text(joined)
 
+    # nome
     nome = ""
     for ln in lines[:6]:
         if phone and phone[-11:] in re.sub(r"\D+", "", ln):
             continue
         if "placa" in ln.lower():
             continue
-        if "último posicionamento" in ln.lower():
+        if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
             continue
-        if ADDRESS_RE.search(ln):
-            continue
-        nome = re.sub(r"(?i)^\s*cliente\s*:\s*", "", ln).strip()
+        nome = ln
         break
     if not nome:
         nome = "Sem nome"
 
-    endereco = extract_address(lines)
+    # endereço (primeira linha com rua/av)
+    endereco = ""
+    for ln in lines:
+        if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
+            endereco = ln
+            break
 
+    # data (dd/mm/aaaa)
     data = ""
     mdate = re.search(r"\b\d{2}/\d{2}/\d{4}\b", joined)
     if mdate:
@@ -261,388 +183,21 @@ def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
         return False
 
 
-def _is_linux() -> bool:
-    return sys.platform.startswith("linux")
-
-
-def _supports_local_debug_attach() -> bool:
-    # Attach ao Chrome via porta local depende de navegador na mesma maquina do app.
-    # Em Linux com DISPLAY (desktop local), tambem pode existir.
-    if sys.platform.startswith(("win", "darwin")):
-        return True
-    if _is_linux() and os.getenv("DISPLAY"):
-        return True
-    return False
-
-
-def _is_headless_server_runtime() -> bool:
-    # Considera runtime de servidor quando Linux sem DISPLAY (ex.: deploy cloud/container).
-    return _is_linux() and not os.getenv("DISPLAY")
-
-
-def _find_chromedriver_path() -> Optional[str]:
-    env_path = (os.getenv("CHROMEDRIVER_PATH") or "").strip()
-    if env_path:
-        return env_path
-
-    for p in (
-        "/usr/bin/chromedriver",
-        "/usr/lib/chromium/chromedriver",
-        "/usr/lib/chromium-browser/chromedriver",
-        "/snap/bin/chromedriver",
-    ):
-        if os.path.exists(p):
-            return p
-
-    system_path = shutil.which("chromedriver")
-    if system_path:
-        # Evita binário cacheado pelo Selenium Manager que pode quebrar no deploy
-        # (erro 127 por incompatibilidade com a imagem Linux).
-        if "/.cache/selenium/" not in system_path:
-            return system_path
-    return None
-
-
-def _configure_linux_runtime(opts: Options) -> None:
-    if not _is_linux():
-        return
-
-    # Stability flags for Linux containers/servers.
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-software-rasterizer")
-    opts.add_argument("--remote-debugging-port=9222")
-    opts.add_argument("--window-size=1920,1080")
-    # In deploy runtime we always force headless mode, regardless of DISPLAY.
-    if _is_headless_server_runtime() or not os.getenv("DISPLAY"):
-        opts.add_argument("--headless=new")
-
-    chrome_bin = (
-        (os.getenv("CHROME_BINARY") or "").strip()
-        or (os.getenv("CHROMIUM_BINARY") or "").strip()
-    )
-    if chrome_bin:
-        opts.binary_location = chrome_bin
-        return
-
-    for p in (
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-    ):
-        if os.path.exists(p):
-            opts.binary_location = p
-            break
-
-
-def _build_chrome_service() -> Optional[Service]:
-    if not _is_linux():
-        return None
-
-    path = _find_chromedriver_path()
-    return Service(executable_path=path) if path else None
-
-
-def _url_host(raw_url: str) -> str:
-    try:
-        return (urlparse(raw_url).hostname or "").strip()
-    except Exception:
-        return ""
-
-
-def _host_reachable(host: str, timeout_s: float = 2.0) -> bool:
-    if not host:
-        return False
-    for port in (443, 80):
-        if port_open(host, port, timeout_s=timeout_s):
-            return True
-    return False
-
-
-def _runtime_diagnostics() -> List[str]:
-    lines = []
-    lines.append(f"OS: {sys.platform}")
-    lines.append(f"DISPLAY: {'set' if os.getenv('DISPLAY') else 'unset'}")
-    lines.append(f"CHROME_BINARY env: {(os.getenv('CHROME_BINARY') or '').strip() or '(vazio)'}")
-    lines.append(f"CHROMIUM_BINARY env: {(os.getenv('CHROMIUM_BINARY') or '').strip() or '(vazio)'}")
-    lines.append(f"CHROMEDRIVER_PATH env: {(os.getenv('CHROMEDRIVER_PATH') or '').strip() or '(vazio)'}")
-    lines.append(f"Chromium no PATH: {shutil.which('chromium') or '(nao encontrado)'}")
-    lines.append(f"Google Chrome no PATH: {shutil.which('google-chrome') or '(nao encontrado)'}")
-    lines.append(f"ChromeDriver detectado: {_find_chromedriver_path() or '(nao encontrado)'}")
-    user, pwd = _get_headless_login_credentials()
-    lines.append(f"Credenciais Sonax no deploy: {'configuradas' if user and pwd else 'nao configuradas'}")
-    secret_paths = _available_secret_paths()
-    lines.append(
-        "Secrets detectados: "
-        + (", ".join(secret_paths[:20]) if secret_paths else "(nenhum)")
-    )
-    host = _url_host(URL)
-    lines.append(f"Host Sonax ({host}) alcancavel: {'sim' if _host_reachable(host) else 'nao'}")
-    return lines
-
-
-def _read_secret_value(key: str) -> str:
-    try:
-        val = st.secrets.get(key, "")
-        if val is not None and not isinstance(val, Mapping):
-            return str(val).strip()
-        for k, v in st.secrets.items():
-            if str(k).strip().lower() == key.strip().lower():
-                if v is not None and not isinstance(v, Mapping):
-                    return str(v).strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _read_nested_secret_value(section: str, key: str) -> str:
-    try:
-        block = st.secrets.get(section, {})
-        if not isinstance(block, Mapping):
-            for sec_key, sec_val in st.secrets.items():
-                if str(sec_key).strip().lower() == section.strip().lower() and isinstance(sec_val, Mapping):
-                    block = sec_val
-                    break
-        if isinstance(block, Mapping):
-            val = block.get(key, "")
-            if val is not None and not isinstance(val, Mapping):
-                return str(val).strip()
-            for k, v in block.items():
-                if str(k).strip().lower() == key.strip().lower():
-                    if v is not None and not isinstance(v, Mapping):
-                        return str(v).strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _iter_secret_leaf_values(data, path: str = ""):
-    if isinstance(data, Mapping):
-        for k, v in data.items():
-            k_str = str(k).strip()
-            next_path = f"{path}.{k_str}" if path else k_str
-            if isinstance(v, Mapping):
-                yield from _iter_secret_leaf_values(v, next_path)
-            elif v is not None:
-                yield next_path, k_str, str(v).strip()
-
-
-def _find_secret_value_by_aliases(aliases: set[str], require_sonax_in_path: bool = False) -> str:
-    try:
-        for path, key, value in _iter_secret_leaf_values(st.secrets):
-            if not value:
-                continue
-            key_norm = re.sub(r"[^a-z0-9]+", "", key.lower())
-            path_norm = re.sub(r"[^a-z0-9]+", "", path.lower())
-            if key_norm in aliases:
-                if require_sonax_in_path and "sonax" not in path_norm:
-                    continue
-                return value
-    except Exception:
-        pass
-    return ""
-
-
-def _available_secret_paths() -> List[str]:
-    out = []
-    try:
-        for path, _, value in _iter_secret_leaf_values(st.secrets):
-            if value:
-                out.append(path)
-    except Exception:
-        pass
-    return out
-
-
-def _get_headless_login_credentials() -> tuple[str, str]:
-    # Prioridade: st.secrets -> env vars.
-    user = (
-        _read_secret_value("SONAX_USERNAME")
-        or _read_secret_value("SONAX_USER")
-        or _read_secret_value("SONAX_LOGIN")
-        or _read_nested_secret_value("sonax", "username")
-        or _read_nested_secret_value("sonax", "user")
-        or _read_nested_secret_value("sonax", "login")
-        or _read_nested_secret_value("credentials", "SONAX_USERNAME")
-        or _read_nested_secret_value("credentials", "SONAX_USER")
-        or _read_nested_secret_value("credentials", "SONAX_LOGIN")
-        or _read_nested_secret_value("auth", "SONAX_USERNAME")
-        or _read_nested_secret_value("auth", "SONAX_USER")
-        or _read_nested_secret_value("auth", "SONAX_LOGIN")
-        or _find_secret_value_by_aliases({"sonaxusername", "sonaxuser", "sonaxlogin"})
-        or _find_secret_value_by_aliases({"username", "user", "login"}, require_sonax_in_path=True)
-        or (os.getenv("SONAX_USERNAME") or "").strip()
-        or (os.getenv("SONAX_USER") or "").strip()
-        or (os.getenv("SONAX_LOGIN") or "").strip()
-    )
-    pwd = (
-        _read_secret_value("SONAX_PASSWORD")
-        or _read_secret_value("SONAX_PASS")
-        or _read_nested_secret_value("sonax", "password")
-        or _read_nested_secret_value("sonax", "pass")
-        or _read_nested_secret_value("credentials", "SONAX_PASSWORD")
-        or _read_nested_secret_value("credentials", "SONAX_PASS")
-        or _read_nested_secret_value("auth", "SONAX_PASSWORD")
-        or _read_nested_secret_value("auth", "SONAX_PASS")
-        or _find_secret_value_by_aliases({"sonaxpassword", "sonaxpass"})
-        or _find_secret_value_by_aliases({"password", "pass"}, require_sonax_in_path=True)
-        or (os.getenv("SONAX_PASSWORD") or "").strip()
-        or (os.getenv("SONAX_PASS") or "").strip()
-    )
-    return user, pwd
-
-
-def _find_visible_input(driver, xpath: str):
-    for el in driver.find_elements(By.XPATH, xpath):
-        try:
-            if el.is_displayed() and el.is_enabled():
-                return el
-        except Exception:
-            continue
-    return None
-
-
-def _set_input_value(el, value: str):
-    el.click()
-    el.send_keys(Keys.CONTROL, "a")
-    el.send_keys(Keys.BACKSPACE)
-    el.send_keys(value or "")
-
-
-def try_headless_login_with_credentials(driver, timeout_s: float = HEADLESS_LOGIN_TIMEOUT_S) -> bool:
-    user, pwd = _get_headless_login_credentials()
-    if not user or not pwd:
-        return False
-
-    end_at = time.time() + timeout_s
-    while time.time() < end_at:
-        if has_authenticated_sonax_session(driver, timeout_s=0.8):
-            return True
-
-        user_input = _find_visible_input(
-            driver,
-            (
-                "//input[not(@type='password') and ("
-                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
-                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
-                "contains(translate(@placeholder,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
-                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
-                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
-                "contains(translate(@aria-label,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
-                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
-                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
-                "contains(translate(@name,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login') or "
-                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'usuario') or "
-                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'email') or "
-                "contains(translate(@id,'USUARIOEMAILLOGIN','usuarioemaillogin'),'login'))]"
-            ),
-        )
-        if user_input is None:
-            user_input = _find_visible_input(
-                driver,
-                "//input[not(@type='password') and not(@type='hidden') and not(@disabled)]",
-            )
-
-        pwd_input = _find_visible_input(
-            driver,
-            "//input[@type='password' and not(@disabled)]",
-        )
-
-        if user_input is None or pwd_input is None:
-            time.sleep(0.4)
-            continue
-
-        _set_input_value(user_input, user)
-        _set_input_value(pwd_input, pwd)
-
-        submit = _find_visible_input(
-            driver,
-            (
-                "//button[@type='submit' or "
-                "contains(normalize-space(.),'Entrar') or contains(normalize-space(.),'entrar') or "
-                "contains(normalize-space(.),'Login') or contains(normalize-space(.),'login') or "
-                "contains(normalize-space(.),'Acessar') or contains(normalize-space(.),'acessar')]"
-            ),
-        )
-        if submit is not None:
-            submit.click()
-        else:
-            pwd_input.send_keys(Keys.ENTER)
-
-        if wait_for_authenticated_sonax_session(driver, timeout_s=8.0):
-            return True
-
-        time.sleep(0.4)
-    return False
-
-
-def _open_login_in_new_tab(url: str) -> None:
-    # Try to trigger a new tab from the user click that started the run.
-    components.html(
-        f"""
-        <script>
-          (function () {{
-            try {{
-              const w = window.open("{url}", "_blank", "noopener,noreferrer");
-              if (w) {{ w.focus(); }}
-            }} catch (e) {{
-              // Popup blocked: fallback link stays available below.
-            }}
-          }})();
-        </script>
-        """,
-        height=0,
-    )
-    st.caption("Se a aba nao abrir automaticamente, use o link abaixo.")
-    st.markdown(
-        f'<a href="{url}" target="_blank" rel="noopener noreferrer">Abrir login do Sonax em nova aba</a>',
-        unsafe_allow_html=True,
-    )
-
-
-def _start_chrome(opts: Options, service: Optional[Service] = None) -> webdriver.Chrome:
-    if service:
-        try:
-            return webdriver.Chrome(service=service, options=opts)
-        except WebDriverException as e:
-            # Fallback para Selenium Manager caso o chromedriver do sistema falhe.
-            last_err = str(e)
-            if "Status code was: 127" not in last_err:
-                raise
-
-    try:
-        return webdriver.Chrome(options=opts)
-    except Exception as e:
-        raise RuntimeError(
-            "Falha ao iniciar Chrome/ChromeDriver no Linux. "
-            "No deploy, instale Chromium + ChromeDriver do sistema e defina "
-            "CHROME_BINARY/CHROMEDRIVER_PATH quando necessário. "
-            f"Detalhe: {e}"
-        ) from e
-
-
+# bloqueando popups
 def make_driver_attach(debug_port: int) -> webdriver.Chrome:
     opts = Options()
-    opts.page_load_strategy = "eager"
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{debug_port}")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
-    _configure_linux_runtime(opts)
-    service = _build_chrome_service()
-    return _start_chrome(opts, service=service)
+    return webdriver.Chrome(options=opts)
 
 
 def make_driver_new() -> webdriver.Chrome:
     opts = Options()
-    opts.page_load_strategy = "eager"
     opts.add_argument("--start-maximized")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-popup-blocking")
-    _configure_linux_runtime(opts)
-    service = _build_chrome_service()
-    return _start_chrome(opts, service=service)
+    return webdriver.Chrome(options=opts)
 
 
 def maybe_close_popup(driver) -> bool:
@@ -657,53 +212,22 @@ def maybe_close_popup(driver) -> bool:
         return False
 
 
-def wait_ui_idle(driver, timeout_s: float = 0.9, poll_s: float = 0.05) -> None:
-    end_at = time.time() + max(0.05, timeout_s)
-    while time.time() < end_at:
-        try:
-            is_idle = driver.execute_script(
-                """
-                const rs = document.readyState;
-                const busy = document.querySelector(
-                  '.loading, .spinner, .ngx-spinner-overlay, .cdk-overlay-backdrop-showing, .blockUI, .busy'
-                );
-                return (rs === 'interactive' || rs === 'complete') && !busy;
-                """
-            )
-            if is_idle:
-                return
-        except Exception:
-            return
-        time.sleep(poll_s)
-
-
-def wait_sonax_settle(driver, delay_s: float = SONAX_CLICK_DELAY_S):
-    try:
-        wait_ui_idle(driver, timeout_s=0.9)
-    except Exception:
-        pass
-    if delay_s > 0:
-        time.sleep(delay_s)
-
-
-def click_retry(driver, by, value, tries=3, timeout=25, post_wait=SONAX_CLICK_DELAY_S):
+def click_retry(driver, by, value, tries=3, timeout=25):
     last = None
     for _ in range(tries):
         try:
             el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, value)))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
             el.click()
-            if post_wait:
-                wait_sonax_settle(driver, post_wait)
             return el
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(SONAX_RETRY_BACKOFF_S)
+            time.sleep(0.25)
     raise last
 
 
-def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, timeout=25, post_wait=0):
+def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, timeout=25):
     last = None
     for _ in range(tries):
         try:
@@ -716,18 +240,16 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
             el.send_keys(text)
             if press_enter:
                 el.send_keys(Keys.ENTER)
-            if post_wait:
-                wait_sonax_settle(driver, post_wait)
             return el
         except Exception as e:
             last = e
             maybe_close_popup(driver)
-            time.sleep(SONAX_RETRY_BACKOFF_S)
+            time.sleep(0.25)
     raise last
 
 
 def ensure_sonax_tab(driver):
-    target = "chat.sonax.net.br"
+    target = "chat.sonax.net.br/app/omnichannel/chat"
     for h in driver.window_handles:
         driver.switch_to.window(h)
         try:
@@ -737,7 +259,7 @@ def ensure_sonax_tab(driver):
             pass
 
     try:
-        _safe_get(driver, URL, timeout_s=PAGE_LOAD_TIMEOUT_S)
+        driver.get(URL)
     except Exception:
         driver.execute_script(f"window.open('{URL}','_blank');")
         driver.switch_to.window(driver.window_handles[-1])
@@ -745,97 +267,11 @@ def ensure_sonax_tab(driver):
     WebDriverWait(driver, 30).until(
         lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
     )
-    time.sleep(SONAX_PAGE_LOAD_DELAY_S)
 
 
-def _safe_get(driver, url: str, timeout_s: float = PAGE_LOAD_TIMEOUT_S) -> None:
-    try:
-        driver.set_page_load_timeout(timeout_s)
-    except Exception:
-        pass
-    try:
-        driver.get(url)
-    except TimeoutException:
-        # Com "eager" e timeout curto evitamos travar indefinidamente no deploy.
-        pass
-
-
-def _has_visible_password_input(driver) -> bool:
-    try:
-        pwd_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-    except Exception:
-        return False
-
-    for el in pwd_inputs:
-        try:
-            if el.is_displayed():
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
-    end_at = time.time() + timeout_s
-    while time.time() < end_at:
-        try:
-            current_url = (driver.current_url or "").lower()
-        except Exception:
-            current_url = ""
-
-        has_pwd_visible = _has_visible_password_input(driver)
-
-        if "/login" in current_url and has_pwd_visible:
-            time.sleep(0.2)
-            continue
-
-        # O Sonax ja usou mais de uma rota apos login; aceite qualquer /app/...
-        # (exceto /login, tratado acima) para nao travar quando mudarem o caminho.
-        if "/app/" in current_url:
-            return True
-
-        # Se houver marcador claro de tela de login, ainda nao autenticou.
-        try:
-            if has_pwd_visible and driver.find_elements(*SEL_LOGIN_MARKERS):
-                time.sleep(0.2)
-                continue
-        except Exception:
-            pass
-
-        # Fallback: se ainda estiver no host do Sonax e nao houver campo de senha,
-        # considere sessao autenticada para evitar falso negativo por mudanca de rota/layout.
-        try:
-            if "sonax.net.br" in current_url and not has_pwd_visible:
-                return True
-        except Exception:
-            pass
-
-        try:
-            if driver.find_elements(*SEL_CONTATOS):
-                return True
-            if driver.find_elements(*SEL_CONTATOS_ALT):
-                return True
-            if driver.find_elements(*SEL_BUSCA):
-                return True
-            if driver.find_elements(*SEL_BUSCA_ALT):
-                return True
-        except Exception:
-            pass
-        time.sleep(0.2)
-    return False
-
-
-# Seleção Sonax (com fallback para pequenas variações de layout/texto)
+# Seleção
 SEL_CONTATOS = (By.XPATH, "//a[contains(@class,'nav-link')][contains(.,'Contatos')]")
-SEL_CONTATOS_ALT = (
-    By.XPATH,
-    "//*[self::a or self::button or self::span][contains(translate(normalize-space(.),'CONTATOS','contatos'),'contatos')]",
-)
 SEL_BUSCA = (By.CSS_SELECTOR, "input.form-control.input-search")
-SEL_BUSCA_ALT = (
-    By.XPATH,
-    "//input[contains(@placeholder,'Busca') or contains(@placeholder,'Pesquisar') or contains(@placeholder,'Search') or contains(@class,'search')]",
-)
 SEL_CONVERSAR = (By.CSS_SELECTOR, "button#dropdownBasic1")
 SEL_LWSIMAPP = (By.XPATH, "//*[contains(@class,'ml-2') and contains(.,'LWSIMAPP')]")
 SEL_COMBOBOX = (By.CSS_SELECTOR, "input[role='combobox']")
@@ -843,17 +279,10 @@ SEL_TEMPLATE = (
     By.XPATH,
     "//span[contains(@class,'ng-option-label') and normalize-space(.)='abertura_de_diagnostico_tagpro']",
 )
+
+# ⚠️ esse placeholder depende do texto EXATO do site. Com UTF-8 corrigido fica:
 SEL_VAR_INPUTS = (By.CSS_SELECTOR, "input.form-control[placeholder='Insira a variável aqui']")
 SEL_ENVIAR = (By.XPATH, "//button[contains(@class,'btn-primary') and normalize-space(.)='Enviar']")
-SEL_STATUS_BADGE = (By.CSS_SELECTOR, "span.badge.badge-secondary")
-SEL_LOGIN_MARKERS = (
-    By.XPATH,
-    (
-        "//*[contains(translate(normalize-space(.),'USUÁRIOABCDEFGHIJKLMNOPQRSTUVWXYZ','usuárioabcdefghijklmnopqrstuvwxyz'),'usuário') "
-        "or contains(translate(normalize-space(.),'USUARIOABCDEFGHIJKLMNOPQRSTUVWXYZ','usuarioabcdefghijklmnopqrstuvwxyz'),'usuario') "
-        "or contains(translate(normalize-space(.),'INFORMEABCDEFGHIJKLMNOPQRSTUVWXYZ','informeabcdefghijklmnopqrstuvwxyz'),'informe seu usuário')]"
-    ),
-)
 
 
 def click_card_contact(driver, phone_digits: str) -> bool:
@@ -873,126 +302,39 @@ def click_card_contact(driver, phone_digits: str) -> bool:
             return False
 
 
-def click_contatos(driver):
-    try:
-        return click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
-    except Exception:
-        return click_retry(driver, *SEL_CONTATOS_ALT, tries=3, timeout=30)
-
-
-def focus_busca(driver):
-    try:
-        return click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
-    except Exception:
-        return click_retry(driver, *SEL_BUSCA_ALT, tries=3, timeout=30)
-
-
-def type_busca(driver, text: str):
-    try:
-        return type_retry(
-            driver, *SEL_BUSCA, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
-        )
-    except Exception:
-        return type_retry(
-            driver, *SEL_BUSCA_ALT, text, clear=True, press_enter=True, tries=3, timeout=30, post_wait=SONAX_SEARCH_POST_WAIT_S
-        )
-
-
-def wait_for_authenticated_sonax_session(driver, timeout_s: float = 180.0) -> bool:
-    end_at = time.time() + timeout_s
-    while time.time() < end_at:
-        if has_authenticated_sonax_session(driver, timeout_s=0.6):
-            return True
-        maybe_close_popup(driver)
-        time.sleep(0.25)
-    return False
-
-
-def in_contacts_context(driver) -> bool:
-    try:
-        if driver.find_elements(*SEL_BUSCA):
-            return True
-    except Exception:
-        pass
-    try:
-        if driver.find_elements(*SEL_BUSCA_ALT):
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def fill_template_variables_in_order(driver, placa: str, data: str, endereco: str):
+    """
+    Como os 3 campos são iguais, preenche pela ORDEM:
+    [0]=placa, [1]=data, [2]=endereço
+    """
     inputs = WebDriverWait(driver, 25).until(lambda d: d.find_elements(*SEL_VAR_INPUTS))
     if len(inputs) < 3:
         raise RuntimeError(f"Esperava 3 campos de variável, mas encontrei {len(inputs)}.")
-
-    def _set_value_with_fallback(el, value: str):
-        val = value or ""
-        el.click()
-        el.send_keys(Keys.CONTROL, "a")
-        el.send_keys(Keys.BACKSPACE)
-        if val:
-            el.send_keys(val)
-        current = (el.get_attribute("value") or "").strip()
-        if current == val.strip():
-            return
-        driver.execute_script(
-            """
-            const input = arguments[0];
-            const value = arguments[1] || '';
-            input.focus();
-            input.value = value;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-            """,
-            el,
-            val,
-        )
 
     values = [placa or "", data or "", endereco or ""]
     for i in range(3):
         el = inputs[i]
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        _set_value_with_fallback(el, values[i])
+        el.click()
+        el.send_keys(Keys.CONTROL, "a")
+        el.send_keys(Keys.BACKSPACE)
+        el.send_keys(values[i])
         time.sleep(0.1)
-
-
-def read_chat_status_badge(driver, timeout: float = 6.0) -> str:
-    end_at = time.time() + timeout
-    while time.time() < end_at:
-        try:
-            badges = driver.find_elements(*SEL_STATUS_BADGE)
-        except Exception:
-            badges = []
-
-        for b in badges:
-            try:
-                if not b.is_displayed():
-                    continue
-                txt = (b.text or "").strip().lower()
-                if txt in ("aberto", "fechado"):
-                    return txt
-            except Exception:
-                continue
-        time.sleep(0.2)
-    return ""
 
 
 def run_one_client(driver, client: Cliente, log):
     maybe_close_popup(driver)
 
     log(f"➡️ {client.nome}: Contatos")
-    if not in_contacts_context(driver):
-        click_contatos(driver)
+    click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
     maybe_close_popup(driver)
 
     found = False
     for ph in phone_variations(client.telefone):
         log(f"🔎 {client.nome}: Buscar {ph}")
-        focus_busca(driver)
-        type_busca(driver, ph)
+        click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
+        type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30)
+        time.sleep(0.9)
         if click_card_contact(driver, ph):
             found = True
             break
@@ -1006,11 +348,6 @@ def run_one_client(driver, client: Cliente, log):
     log(f"💬 {client.nome}: Conversar")
     click_retry(driver, *SEL_CONVERSAR, tries=3, timeout=30)
     maybe_close_popup(driver)
-
-    badge_status = read_chat_status_badge(driver, timeout=6.0)
-    if badge_status == "aberto":
-        log(f"⏭️ {client.nome}: status do atendimento em aberto (pulando)")
-        return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "EM ABERTO"}
 
     log(f"📲 {client.nome}: LWSIMAPP")
     click_retry(driver, *SEL_LWSIMAPP, tries=3, timeout=30)
@@ -1032,13 +369,8 @@ def run_one_client(driver, client: Cliente, log):
     return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "OK"}
 
 
-# =========================
-# UI (PT-BR)
-# =========================
-
+# UI
 st.set_page_config(page_title="Sonax Automação Kezia", layout="wide")
-
-# CSS: sem [class*="st-"] (corrige o bug do texto duplicado)
 st.markdown(
     """
 <style>
@@ -1046,95 +378,20 @@ section[data-testid="stSidebar"] { display: none !important; }
 div[data-testid="collapsedControl"] { display: none !important; }
 .block-container { padding-top: 1.2rem; }
 
-html, body {
-  font-family: "Segoe UI", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif !important;
-}
-
-input, textarea, [contenteditable="true"] {
-  text-shadow: none !important;
-  -webkit-text-stroke: 0 !important;
+/* Fonte com suporte a emojis (principalmente Windows) */
+html, body, [class*="st-"] {
+  font-family: "Segoe UI", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
 }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# JS: traduz textos do file_uploader (Browse files, Drag and drop..., Limit...)
-components.html(
-    """
-<script>
-(function() {
-  const PT = {
-    browse: "Selecionar arquivo",
-    drop: "Arraste e solte o arquivo aqui",
-    limit: "Limite de 200MB por arquivo • DOCX"
-  };
+st.title("Sonax • Automação da KESIA")
 
-  function applyPT() {
-    // tenta localizar todas as áreas de uploader na página
-    const uploaders = parent.document.querySelectorAll('[data-testid="stFileUploader"]');
-    uploaders.forEach(u => {
-      // botão
-      const btn = u.querySelector('button');
-      if (btn) {
-        const span = btn.querySelector('span') || btn;
-        if (span && span.innerText && span.innerText.toLowerCase().includes('browse')) {
-          span.innerText = PT.browse;
-        }
-      }
-
-      // dropzone
-      const drop = u.querySelector('[data-testid="stFileUploaderDropzone"]');
-      if (drop) {
-        // texto principal (p/div)
-        const nodes = drop.querySelectorAll('p, div, span');
-        nodes.forEach(n => {
-          const t = (n.innerText || '').trim().toLowerCase();
-          if (t === 'drag and drop file here' || t.includes('drag and drop')) {
-            n.innerText = PT.drop;
-          }
-        });
-
-        // linha do limite (small)
-        const smalls = drop.querySelectorAll('small');
-        smalls.forEach(s => {
-          const t = (s.innerText || '').trim().toLowerCase();
-          if (t.includes('limit') && (t.includes('per file') || t.includes('file'))) {
-            s.innerText = PT.limit;
-          }
-        });
-      }
-    });
-  }
-
-  // aplica agora e fica observando mudanças (Streamlit re-renderiza)
-  applyPT();
-
-  const obs = new MutationObserver(() => applyPT());
-  obs.observe(parent.document.body, { childList: true, subtree: true });
-})();
-</script>
-""",
-    height=0,
-)
-
-st.title("Sonax • Automação da KEZIA")
-
-st.session_state.setdefault("attach", not _is_headless_server_runtime())
+st.session_state.setdefault("attach", True)
 st.session_state.setdefault("debug_port", 9222)
 st.session_state.setdefault("max_items", 50)
-
-if _is_headless_server_runtime():
-    st.warning(
-        "Ambiente de deploy detectado (sem interface gráfica). "
-        "O Chrome não abre no seu computador; ele roda em modo headless no servidor."
-    )
-    st.caption(
-        "Se precisar ver/interagir com a janela do navegador, execute este app localmente no seu Windows."
-    )
-    with st.expander("Diagnóstico do deploy", expanded=False):
-        for ln in _runtime_diagnostics():
-            st.code(ln)
 
 with st.expander("Configurar", expanded=False):
     st.session_state.max_items = st.number_input(
@@ -1147,7 +404,7 @@ with st.expander("Configurar", expanded=False):
 
 st.markdown("---")
 
-uploaded = st.file_uploader("📄 Envie o arquivo DOCX com os clientes", type=["docx"])
+uploaded = st.file_uploader("📄 Envie o Arquivo DOCX com os clientes", type=["docx"])
 if not uploaded:
     st.info("Envie o arquivo para carregar os clientes.")
     st.stop()
@@ -1158,7 +415,7 @@ clients = clients[: int(st.session_state.max_items)]
 st.success(f"Clientes carregados: {len(clients)}")
 
 with st.expander("Ver clientes identificados", expanded=False):
-    st.dataframe(pd.DataFrame([c.__dict__ for c in clients]), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame([c.__dict__ for c in clients]), use_container_width=True, hide_index=True)
 
 start = st.button("▶ Iniciar automação", type="primary")
 
@@ -1176,75 +433,22 @@ if start:
     driver = None
 
     try:
-        status_box.info("Validando pré-requisitos...")
-        if not _supports_local_debug_attach() and st.session_state.attach:
-            status_box.info("Deploy sem interface grafica: ignorando anexo a porta local do Chrome.")
-            st.session_state.attach = False
-
-        if _is_headless_server_runtime():
-            user, pwd = _get_headless_login_credentials()
-            if not user or not pwd:
-                secret_paths = _available_secret_paths()
-                diag = ", ".join(secret_paths[:20]) if secret_paths else "nenhuma chave detectada"
-                raise RuntimeError(
-                    "Credenciais nao configuradas no deploy. Defina SONAX_USERNAME e SONAX_PASSWORD "
-                    "em Settings > Secrets do Streamlit e rode novamente. "
-                    f"Chaves detectadas: {diag}."
-                )
-
         if st.session_state.attach:
             status_box.info("Testando porta do Chrome...")
             if not port_open("127.0.0.1", int(st.session_state.debug_port)):
-                status_box.warning("Não encontrei Chrome na porta informada. Vou abrir um Chrome novo.")
+                status_box.warning("Não tem Chrome na porta informada. Vou abrir um Chrome novo.")
                 driver = make_driver_new()
-                _safe_get(driver, URL)
+                driver.get(URL)
             else:
                 status_box.info("Conectando ao Chrome existente...")
                 driver = make_driver_attach(int(st.session_state.debug_port))
         else:
-            if _is_headless_server_runtime():
-                status_box.info("Iniciando Chromium headless no servidor de deploy...")
-                host = _url_host(URL)
-                if not _host_reachable(host):
-                    raise RuntimeError(
-                        f"O servidor de deploy nao alcanca {host}. "
-                        "Se esse sistema depende de rede interna/VPN, execute localmente."
-                    )
-                if not _find_chromedriver_path():
-                    raise RuntimeError(
-                        "ChromeDriver nao encontrado no deploy. "
-                        "Confirme packages.txt com chromium + chromium-driver."
-                    )
-            else:
-                status_box.info("Abrindo Chrome novo no computador local...")
+            status_box.info("Abrindo Chrome novo...")
             driver = make_driver_new()
-            _safe_get(driver, URL)
+            driver.get(URL)
 
         status_box.info("Indo para a aba do Sonax...")
         ensure_sonax_tab(driver)
-
-        if _is_headless_server_runtime():
-            if not has_authenticated_sonax_session(driver):
-                status_box.info("Sessao nao autenticada no deploy. Tentando login com credenciais do servidor...")
-                if not try_headless_login_with_credentials(driver):
-                    raise RuntimeError(
-                        "Sessao nao autenticada no navegador headless do deploy. "
-                        "Configure credenciais no servidor (st.secrets ou env): "
-                        "SONAX_USERNAME/SONAX_PASSWORD (ou aliases SONAX_USER/SONAX_PASS). "
-                        "O login do navegador local nao e compartilhado com o deploy. "
-                        "Para login manual, execute o app localmente no seu computador."
-                    )
-        else:
-            if not has_authenticated_sonax_session(driver, timeout_s=2.0):
-                status_box.warning(
-                    "Faça login no Sonax na janela do Chrome aberta e aguarde. "
-                    "Vou iniciar automaticamente quando a tela principal carregar."
-                )
-                if not wait_for_authenticated_sonax_session(driver, timeout_s=240.0):
-                    status_box.warning(
-                        "Nao consegui confirmar o login em ate 240s. "
-                        "Vou tentar continuar a automacao mesmo assim."
-                    )
 
         status_box.success("Executando automação...")
         for i, c in enumerate(clients, start=1):
@@ -1263,10 +467,10 @@ if start:
     if results:
         rdf = pd.DataFrame(results)
         st.subheader("Resultado")
-        st.dataframe(rdf, width="stretch", hide_index=True)
+        st.dataframe(rdf, use_container_width=True, hide_index=True)
         st.download_button(
             "Baixar resultado (.csv)",
-            data=rdf.to_csv(index=False).encode("utf-8-sig"),
+            data=rdf.to_csv(index=False).encode("utf-8-sig"),  # BOM pro Excel
             file_name="resultado_sonax.csv",
             mime="text/csv",
         )
