@@ -6,6 +6,7 @@ import socket
 import os
 import shutil
 import sys
+import random
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from io import BytesIO
@@ -28,6 +29,10 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 URL = "https://chat.sonax.net.br/app/omnichannel/chat"
 PAGE_LOAD_TIMEOUT_S = 45.0
 HEADLESS_LOGIN_TIMEOUT_S = 45.0
+HUMAN_STEP_DELAY_MIN_S = 0.45
+HUMAN_STEP_DELAY_MAX_S = 1.2
+HUMAN_CHAR_DELAY_MIN_S = 0.04
+HUMAN_CHAR_DELAY_MAX_S = 0.12
 
 
 @dataclass
@@ -41,6 +46,8 @@ class Cliente:
 
 PHONE_RE = re.compile(r"(?:\+?55)?\s*\(?\d{2}\)?\s*\d{4,5}-?\d{4}")
 PLATE_CANDIDATE_RE = re.compile(r"\b[A-Z]{3}[A-Z0-9]{4,5}\b", re.IGNORECASE)
+LAST_POSITION_RE = re.compile(r"(?i)^\s*último\s+posicionamento\s*:\s*(.+)\s*$")
+LAST_POSITION_ASCII_RE = re.compile(r"(?i)^\s*ultimo\s+posicionamento\s*:\s*(.+)\s*$")
 
 
 def normalize_phone(raw: str) -> Optional[str]:
@@ -137,9 +144,19 @@ def parse_record_block(block_lines: List[str]) -> Optional[Cliente]:
     if not nome:
         nome = "Sem nome"
 
-    # endereço (primeira linha com rua/av)
+    # endereço: prioriza "Último posicionamento: <endereço>"
     endereco = ""
     for ln in lines:
+        m = LAST_POSITION_RE.search(ln) or LAST_POSITION_ASCII_RE.search(ln)
+        if m:
+            endereco = (m.group(1) or "").strip(" -")
+            if endereco:
+                break
+
+    # fallback: primeira linha com rua/av
+    for ln in lines:
+        if endereco:
+            break
         if re.search(r"(?i)\b(rua|avenida|av\.|rodovia|estrada)\b", ln):
             endereco = ln
             break
@@ -189,6 +206,19 @@ def port_open(host: str, port: int, timeout_s: float = 0.35) -> bool:
             return True
     except Exception:
         return False
+
+
+def _human_pause(min_s: float = HUMAN_STEP_DELAY_MIN_S, max_s: float = HUMAN_STEP_DELAY_MAX_S) -> None:
+    time.sleep(random.uniform(min_s, max_s))
+
+
+def _human_type(el, text: str, press_enter: bool = False) -> None:
+    for ch in text or "":
+        el.send_keys(ch)
+        time.sleep(random.uniform(HUMAN_CHAR_DELAY_MIN_S, HUMAN_CHAR_DELAY_MAX_S))
+    if press_enter:
+        time.sleep(random.uniform(0.08, 0.2))
+        el.send_keys(Keys.ENTER)
 
 
 def _is_linux() -> bool:
@@ -376,7 +406,7 @@ def _set_input_value(el, value: str):
     el.click()
     el.send_keys(Keys.CONTROL, "a")
     el.send_keys(Keys.BACKSPACE)
-    el.send_keys(value or "")
+    _human_type(el, value or "", press_enter=False)
 
 
 def has_authenticated_sonax_session(driver, timeout_s: float = 6.0) -> bool:
@@ -466,7 +496,9 @@ def click_retry(driver, by, value, tries=3, timeout=25):
         try:
             el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, value)))
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            _human_pause(0.18, 0.45)
             el.click()
+            _human_pause(0.25, 0.7)
             return el
         except Exception as e:
             last = e
@@ -485,9 +517,8 @@ def type_retry(driver, by, value, text, clear=True, press_enter=False, tries=3, 
             if clear:
                 el.send_keys(Keys.CONTROL, "a")
                 el.send_keys(Keys.BACKSPACE)
-            el.send_keys(text)
-            if press_enter:
-                el.send_keys(Keys.ENTER)
+            _human_type(el, text, press_enter=press_enter)
+            _human_pause(0.25, 0.6)
             return el
         except Exception as e:
             last = e
@@ -563,26 +594,29 @@ def fill_template_variables_in_order(driver, placa: str, data: str, endereco: st
     for i in range(3):
         el = inputs[i]
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        _human_pause(0.15, 0.4)
         el.click()
         el.send_keys(Keys.CONTROL, "a")
         el.send_keys(Keys.BACKSPACE)
-        el.send_keys(values[i])
-        time.sleep(0.1)
+        _human_type(el, values[i], press_enter=False)
+        _human_pause(0.25, 0.55)
 
 
 def run_one_client(driver, client: Cliente, log):
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"➡️ {client.nome}: Contatos")
     click_retry(driver, *SEL_CONTATOS, tries=3, timeout=30)
     maybe_close_popup(driver)
+    _human_pause()
 
     found = False
     for ph in phone_variations(client.telefone):
         log(f"🔎 {client.nome}: Buscar {ph}")
         click_retry(driver, *SEL_BUSCA, tries=3, timeout=30)
         type_retry(driver, *SEL_BUSCA, ph, clear=True, press_enter=True, tries=3, timeout=30)
-        time.sleep(0.9)
+        _human_pause(1.0, 1.8)
         if click_card_contact(driver, ph):
             found = True
             break
@@ -592,26 +626,32 @@ def run_one_client(driver, client: Cliente, log):
         return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "NÃO ENCONTRADO"}
 
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"💬 {client.nome}: Conversar")
     click_retry(driver, *SEL_CONVERSAR, tries=3, timeout=30)
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"📲 {client.nome}: LWSIMAPP")
     click_retry(driver, *SEL_LWSIMAPP, tries=3, timeout=30)
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"🧾 {client.nome}: Template")
     click_retry(driver, *SEL_COMBOBOX, tries=3, timeout=30)
     click_retry(driver, *SEL_TEMPLATE, tries=3, timeout=30)
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"⌨️ {client.nome}: preenchendo variáveis (placa/data/endereço)")
     fill_template_variables_in_order(driver, client.placa, client.horario, client.endereco)
     maybe_close_popup(driver)
+    _human_pause()
 
     log(f"📨 {client.nome}: Enviar")
     click_retry(driver, *SEL_ENVIAR, tries=3, timeout=30)
+    _human_pause(0.8, 1.5)
 
     log(f"✅ {client.nome}: OK")
     return {"nome": client.nome, "telefone": client.telefone, "placa": client.placa, "status": "OK"}
