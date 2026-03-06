@@ -312,6 +312,8 @@ def _read_nested_secret_value(section: str, key: str) -> str:
 
 
 def _get_headless_login_credentials() -> tuple[str, str]:
+    default_user = "RAFAEL CICARINO"
+    default_pwd = "12345678"
     user = (
         _read_secret_value("SONAX_USERNAME")
         or _read_secret_value("SONAX_USER")
@@ -322,6 +324,7 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or (os.getenv("SONAX_USERNAME") or "").strip()
         or (os.getenv("SONAX_USER") or "").strip()
         or (os.getenv("SONAX_LOGIN") or "").strip()
+        or default_user
     )
     pwd = (
         _read_secret_value("SONAX_PASSWORD")
@@ -330,6 +333,7 @@ def _get_headless_login_credentials() -> tuple[str, str]:
         or _read_nested_secret_value("sonax", "pass")
         or (os.getenv("SONAX_PASSWORD") or "").strip()
         or (os.getenv("SONAX_PASS") or "").strip()
+        or default_pwd
     )
     return user, pwd
 
